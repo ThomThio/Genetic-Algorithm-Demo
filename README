@@ -11,3 +11,15 @@ The problem we solve is:
     **Important: In Fup's code, the evaluation of the expressions generated was simple, left to right
     evaluation. I have used normal arithmetic precedence based evaluation(see `expr.py')
 
+
+FX research scanner (fx_research/)
+----------------------------------
+The same GA idea applied to FX: every hour it labels each pair's last 7 trading
+days with a regime, finds the most similar windows in the last 3 years, and
+evolves fighter-entry settings (limit distance, SL/TP, re-pricing) on what
+happened after them. Results go to the `fx_research` schema in Supabase.
+See docs/FX_MT4_PLAN.md for how it ties into MT4-TradeSignals and TradeCoreV2.
+
+    pip install -r requirements.txt
+    python -m fx_research.scan --dry-run
+    python -m fx_research.scheduler

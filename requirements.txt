@@ -1,0 +1,8 @@
+numpy>=1.26
+pandas>=2.1
+pytz
+APScheduler>=3.10,<4
+supabase>=2.13
+# optional: only when FXR_BAR_SOURCE=mt4 (EACommunicator_API from MT4-TradeSignals)
+pyzmq
+pytest
