@@ -61,6 +61,9 @@ python -m fx_research.scan --source csv --csv-dir ../MT4-TradeSignals/currency_d
 1. **Backfill 3 years of H1.** `fx_prices` only holds what MT4-TradeSignals has saved since it started. Two ways to fill it:
    - run once with `FXR_BAR_SOURCE=mt4`, after raising MT4 *Tools → Options → Charts → Max bars in history*;
    - import broker history CSVs.
-2. **Wire it into the live side.** In `MT4-TradeSignals/tradeHelper.place_limit_order`, read `fx_research.latest_strategy` for the instrument. When `recommended` is true, use its `k_atr` / `sl_atr` / `tp_atr` / `ttl_bars` / `reprice_every` instead of the hard-coded 0.33 / 1.8 / 2.8, and re-enable the re-pricing loop for `reprice_every > 0`. When it's false, skip or reduce size.
+2. **Live side: drafted, not pushed.** `research_strategy.py` for MT4-TradeSignals reads `fx_research.latest_strategy` inside `tradeHelper.place_limit_order`. Behaviour is set with `RESEARCH_MODE`:
+   - `params` (default): when the pair is recommended, the result is under 6 hours old, and the scanner agrees on direction, it sends a real `buy_limit` / `sell_limit`. Distances use the scanner's H1 ATR settings, and a thread re-prices the order every `reprice_every` hours and cancels it after `ttl_bars` hours. Otherwise it uses the old entry.
+   - `gate`: same, but skips the entry instead of falling back.
+   - `off`: the old behaviour.
 3. **Spread.** The backtest uses a flat 1.5 pip spread, which is too wide for majors and too tight for crosses. Log the live spread per pair and feed it in.
 4. **More strategies.** `strategy` is a column, so volume-profile or RCS (relative currency strength) entries can be scored and compared per regime alongside `fighter_limit`.

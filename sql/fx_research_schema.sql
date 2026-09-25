@@ -89,3 +89,6 @@ grant select on all tables in schema fx_research to authenticated, service_role;
 grant all on all tables in schema fx_research to service_role;
 alter default privileges in schema fx_research grant select on tables to authenticated;
 alter default privileges in schema fx_research grant all on tables to service_role;
+
+-- MT4-TradeSignals (research_strategy.py) reads with its anon key: expose only the latest result.
+grant select on fx_research.latest_strategy to anon;
