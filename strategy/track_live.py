@@ -55,11 +55,19 @@ def _live_trades_as_trade_objs(live_trades):
 
 
 def _comparison_table(live_stats, baseline: dict) -> str:
+    live_sharpe = f'{live_stats.sharpe_ratio:.2f}' if live_stats.sharpe_ratio is not None else 'n/a'
+    bt_sharpe = f"{baseline['sharpe_ratio']:.2f}" if baseline['sharpe_ratio'] is not None else 'n/a'
     rows = [
         ('Trades', live_stats.n_trades, baseline['n_trades']),
+        ('Meets min trade count (30)', live_stats.meets_min_trade_count, baseline['meets_min_trade_count']),
         ('Win rate', f'{live_stats.win_rate:.0%}', f"{baseline['win_rate']:.0%}"),
         ('Win rate (Wilson LB 95%)', f'{live_stats.win_rate_lb95:.0%}', f"{baseline['win_rate_lb95']:.0%}"),
         ('Reward:Risk', live_stats.reward_risk, baseline['reward_risk']),
+        ('Profit factor', live_stats.profit_factor, baseline['profit_factor']),
+        ('Net profit (R)', live_stats.net_profit_R, baseline['net_profit_R']),
+        ('Max drawdown (R)', live_stats.max_drawdown_R, baseline['max_drawdown_R']),
+        ('P&L : Drawdown ratio', live_stats.pnl_to_dd_ratio, baseline['pnl_to_dd_ratio']),
+        ('Sharpe ratio (annualized)', live_sharpe, bt_sharpe),
         ('Expectancy (R/trade)', live_stats.expectancy_R, baseline['expectancy_R']),
         ('Edge score', live_stats.edge_score, baseline['edge_score']),
     ]

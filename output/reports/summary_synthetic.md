@@ -1,8 +1,7 @@
 # Discovery run summary: synthetic
 
-| Symbol | Validated | Edge | Win rate (OOS) | R:R (OOS) | Trades (OOS) | Rule | Report |
-|---|---|---|---|---|---|---|---|
-| DEMO_TREND_PULLBACK | YES | +0.001 | 50% | 2.74 | 14 | volatility (ATR) expanding (mult=1.11) AND MACD line above signal | [96226406](96226406-1338-4640-bf3f-9f2009bb1bd1.md) |
-| DEMO_MEAN_REVERT | YES | +0.357 | 61% | 2.51 | 18 | RSI oversold (period=14, threshold=35.0) AND stochastic oversold (period=14, threshold=14.3) | [27923464](27923464-4d30-4be4-82d4-d8b4c1edb327.md) |
-| DEMO_MEAN_REVERT | YES | +0.352 | 61% | 2.50 | 18 | RSI oversold (period=14, threshold=35.0) | [33d2cb3f](33d2cb3f-25e6-4eb5-aec2-a220f93ce18b.md) |
-| DEMO_VOL_BREAKOUT | no | -0.152 | 41% | 2.41 | 27 | MACD line above signal | [cc3b7083](cc3b7083-5cd4-4f82-a1df-cc95e1afed05.md) |
+| Symbol | Validated | Robustness | Edge | Win rate (OOS) | R:R (OOS) | Sharpe (OOS) | Trades (OOS) | Rule | Report |
+|---|---|---|---|---|---|---|---|---|---|
+| DEMO_TREND_PULLBACK | YES | 3/3 passed | +0.307 | 43% | 3.93 | 1.42 | 28 | MACD histogram crosses above zero AND price above SMA (period=20) | [3076caee](3076caee-2d7b-44de-9674-bdbe70755b1c.md) |
+| DEMO_MEAN_REVERT | no | — | -0.161 | 39% | 2.99 | 0.57 | 18 | RSI turning up from oversold (period=14, threshold=34.8) | [44901000](44901000-9a8d-4e3f-9ea4-6d0b5b385e34.md) |
+| DEMO_VOL_BREAKOUT | YES | 1/3 passed | +0.049 | 43% | 3.29 | 0.90 | 21 | close at/below lower Bollinger Band | [dbdba833](dbdba833-6e7a-41c6-bc19-f0281e7c7017.md) |

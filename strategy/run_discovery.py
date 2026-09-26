@@ -27,6 +27,7 @@ from .indicators import compute_indicator_frame
 from .interpretation import interpret
 from .export import build_record, write_records
 from .report import write_reports
+from .robustness import run_all as run_robustness
 from .slicer import train_test_split_chrono
 
 
@@ -80,7 +81,7 @@ def run_for_symbol(args, symbol: str):
         print(f'  no rule cleared the {MIN_TRADES_FOR_SIGNAL}-trade minimum on train data', file=sys.stderr)
         return []
 
-    records = []
+    pairs = []  # (record, evaluated) so robustness testing can get back to the spec
     for evaluated in qualified:
         oos_signal, oos_resolved = materialize_signal(evaluated.spec, test_df, ind_test)
         oos_trades = run_backtest(test_df, ind_test['atr_14'], oos_signal,
@@ -105,7 +106,7 @@ def run_for_symbol(args, symbol: str):
             ga_params={'pop_size': args.pop_size, 'generations': args.generations,
                        'train_frac': args.train_frac},
         )
-        records.append(record)
+        pairs.append((record, evaluated))
 
         flag = 'VALIDATED' if record['validated_out_of_sample'] else 'unvalidated'
         print(f'  [{flag}] edge={record["edge_score"]:+.3f}  '
@@ -118,14 +119,34 @@ def run_for_symbol(args, symbol: str):
     # variant per distinct condition set so the report shows genuinely
     # different algorithms rather than near-duplicates.
     best_per_condition_set = {}
-    for r in records:
-        key = frozenset(c['key'] for c in r['entry_rule']['conditions'])
+    for record, evaluated in pairs:
+        key = frozenset(c['key'] for c in record['entry_rule']['conditions'])
         prev = best_per_condition_set.get(key)
-        if prev is None or r['edge_score'] > prev['edge_score']:
-            best_per_condition_set[key] = r
+        if prev is None or record['edge_score'] > prev[0]['edge_score']:
+            best_per_condition_set[key] = (record, evaluated)
 
-    deduped = sorted(best_per_condition_set.values(), key=lambda r: r['edge_score'], reverse=True)
-    return deduped
+    deduped = sorted(best_per_condition_set.values(), key=lambda pair: pair[0]['edge_score'], reverse=True)
+
+    if not args.skip_robustness:
+        for record, evaluated in deduped:
+            if not record['validated_out_of_sample']:
+                continue
+            print(f"  running robustness checks on {record['entry_rule']['rule_text'][:60]} "
+                  f"({args.n_random} random, {args.n_noise} noise, {args.n_shuffles} shuffle)...",
+                  file=sys.stderr)
+            robustness = run_robustness(df, evaluated.spec, n_random=args.n_random,
+                                         n_noise=args.n_noise, n_shuffles=args.n_shuffles, seed=args.seed)
+            record['robustness'] = robustness
+            vr = robustness.get('vs_random_distribution', {})
+            nt = robustness.get('noise_test', {})
+            pt = robustness.get('permutation_test', {})
+            print(f"    vs random: percentile={vr.get('percentile_rank_vs_random', 'n/a')} "
+                  f"beats95={vr.get('beats_random_at_95pct', 'n/a')} | "
+                  f"noise spread={nt.get('spread_ratio', 'n/a')} robust={nt.get('robust_spread_lt_0_5', 'n/a')} | "
+                  f"permutation percentile={pt.get('percentile_rank_vs_shuffled', 'n/a')} "
+                  f"seq_dependent={pt.get('depends_on_real_sequence_at_95pct', 'n/a')}", file=sys.stderr)
+
+    return [record for record, _ in deduped]
 
 
 def main():
@@ -150,6 +171,11 @@ def main():
     p.add_argument('--out-dir', default='output/strategies')
     p.add_argument('--reports-dir', default='output/reports')
     p.add_argument('--tracking-dir', default='output/live_tracking')
+    p.add_argument('--skip-robustness', action='store_true',
+                    help='skip the random/noise/permutation robustness checks (faster, less rigorous)')
+    p.add_argument('--n-random', type=int, default=200, help='draws for the vs-random-distribution check')
+    p.add_argument('--n-noise', type=int, default=100, help='variants for the noise test')
+    p.add_argument('--n-shuffles', type=int, default=100, help='shuffles for the permutation test')
     args = p.parse_args()
 
     if args.symbols:

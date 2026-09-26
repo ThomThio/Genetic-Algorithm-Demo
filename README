@@ -37,30 +37,86 @@ Rules that keep a positive edge out-of-sample are flagged
 "validated_out_of_sample": true; most won't be, and that's expected --
 finding a real, robust long-only edge is supposed to be hard.
 
-Real data (once Supabase is connected in this workspace):
+Real data (once network access to this workspace's Supabase project is open):
 
     export SUPABASE_URL="https://<project>.supabase.co"
-    export SUPABASE_KEY="<key>"
+    export SUPABASE_KEY="<anon-or-service-role-key>"
     ./.venv/bin/python -m strategy.run_discovery --source supabase \
-        --table ohlcv_daily --symbols BTCUSD,ETHUSD
+        --symbols USDSGD,EURUSD --timeframe H1 --source-name FTMO_MT4_demo
 
-See strategy/data.py for the expected table shape (symbol, timestamp, open,
-high, low, close, volume -- remap column names via --symbol-col/--timestamp-col
-or a col_map if the real schema differs).
+Defaults already match this workspace's public.prices schema (Ccy,
+Timeframe, Source, Datetime, Open, High, Low, Close, Volume) -- see
+strategy/data.py to remap if that ever changes.
 
 Module layout:
     strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
     strategy/genome.py         real-coded chromosome <-> entry-rule decoding
     strategy/backtest.py       long-only trade simulator (next-bar-open fills)
-    strategy/fitness.py        Edge = Wilson-lower-bound-adjusted expectancy
+    strategy/fitness.py        Edge + the full backtest-basics metric set
     strategy/ga_engine.py      the GA loop itself (selection/crossover/mutation)
     strategy/interpretation.py plain-English rationale per archetype combo
     strategy/slicer.py         chronological train/test split
+    strategy/robustness.py     vs-random / noise / permutation overfitting checks
     strategy/data.py           Supabase / CSV / synthetic-demo data loading
     strategy/export.py         JSON schema matching the planned Supabase table
     strategy/report.py         per-strategy Markdown scorecard + run summary
     strategy/track_live.py     log live/paper trades, compare vs. backtest
     strategy/run_discovery.py  CLI that ties it all together
+
+-------------------------------------------------------------------------------
+Metrics computed everywhere edge is computed
+-------------------------------------------------------------------------------
+
+strategy/fitness.py's compute_edge() is the single place trades turn into
+numbers, and every context (GA search, in-sample, out-of-sample, robustness
+variants, live/paper tracking) funnels through it -- so these are always
+defined identically and comparable across environments, instruments, and
+strategies:
+
+    n_trades, meets_min_trade_count      trade count + the 30-trade
+                                          statistical-significance floor
+    win_rate, win_rate_lb95              raw and Wilson-95%-lower-bound win rate
+    avg_win_R, avg_loss_R, reward_risk   average winner/loser size and R:R
+    profit_factor                        gross win / gross loss
+    net_profit_R                         sum of R multiples (risk-normalized P&L;
+                                          no position sizing is modeled, so this
+                                          is P&L in units of risk-per-trade, not $)
+    max_drawdown_R                       worst peak-to-trough on the cumulative-R
+                                          equity curve
+    pnl_to_dd_ratio                      net_profit_R / max_drawdown_R
+    sharpe_ratio                         annualized using trade frequency (mean/std
+                                          of R multiples x sqrt(trades/year); None
+                                          if entry/exit timestamps aren't usable)
+    expectancy_R, edge_score             mean R/trade, and the Wilson-lower-bound-
+                                          adjusted version used to rank/select
+
+Data-splitting: every discovered rule is evolved on a 70/30 (configurable via
+--train-frac) chronological train/test split and reported as both
+performance.in_sample and performance.out_of_sample; validated_out_of_sample
+requires OOS edge_score > 0 with >= 10 OOS trades.
+
+Robustness/overfitting checks (strategy/robustness.py), run automatically in
+run_discovery.py on strategies that already passed the walk-forward gate
+(skip with --skip-robustness; tune sample sizes with --n-random/--n-noise/
+--n-shuffles) and stored under record["robustness"]:
+
+    vs_random_distribution   reruns the same risk model off of randomly timed
+                              entries matched to the real rule's signal count,
+                              many times over; reports the real rule's
+                              percentile rank against that null distribution
+                              (beats_random_at_95pct)
+    noise_test                reruns the same rule against small multiplicative
+                              perturbations of the OHLC data; reports the
+                              (P90-P10)/median spread of edge_score
+                              (robust_spread_lt_0_5, standard threshold <0.5)
+    permutation_test          shuffles the bar-to-bar log-return sequence
+                              (same distribution, randomized order), rebuilds a
+                              synthetic OHLC path, and reruns the rule; reports
+                              whether the real (ordered) edge clearly beats the
+                              shuffled distribution (depends_on_real_sequence_at_95pct)
+
+These are all in the Markdown scorecard (output/reports/<id>.md) and rolled
+up as a pass-count in the run summary index (output/reports/summary_<run>.md).
 
 Every run_discovery.py run, in addition to output/strategies/*.json, writes:
     output/reports/<strategy_id>.md          fixed scorecard: rule, risk model,

@@ -1,0 +1,28 @@
+{
+  "strategy_id": "3076caee-2d7b-44de-9674-bdbe70755b1c",
+  "symbol": "DEMO_TREND_PULLBACK",
+  "rule_text": "MACD histogram crosses above zero AND price above SMA (period=20)",
+  "risk_model": {
+    "stop_atr_mult": 0.71,
+    "target_R": 3.93,
+    "max_hold_bars": 30,
+    "entry_fill": "next_bar_open"
+  },
+  "backtest_baseline": {
+    "n_trades": 28,
+    "win_rate": 0.4286,
+    "win_rate_lb95": 0.2651,
+    "avg_win_R": 3.93,
+    "avg_loss_R": 1.0,
+    "reward_risk": 3.93,
+    "profit_factor": 2.9475,
+    "expectancy_R": 1.1129,
+    "edge_score": 0.3069,
+    "net_profit_R": 31.16,
+    "max_drawdown_R": 10.0,
+    "pnl_to_dd_ratio": 3.116,
+    "sharpe_ratio": 1.4218,
+    "meets_min_trade_count": false
+  },
+  "live_trades": []
+}
