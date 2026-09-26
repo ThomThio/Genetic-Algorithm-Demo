@@ -1,0 +1,28 @@
+{
+  "strategy_id": "9bd57882-72e9-4e34-a0ad-76e44337dce4",
+  "symbol": "DEMO_VOL_BREAKOUT",
+  "rule_text": "fast SMA above slow SMA (fast=10, slow=50) AND MACD line above signal",
+  "risk_model": {
+    "stop_atr_mult": 1.48,
+    "target_R": 3.25,
+    "max_hold_bars": 29,
+    "entry_fill": "next_bar_open"
+  },
+  "backtest_baseline": {
+    "n_trades": 16,
+    "win_rate": 0.375,
+    "win_rate_lb95": 0.1848,
+    "avg_win_R": 2.023,
+    "avg_loss_R": 0.812,
+    "reward_risk": 2.4912,
+    "profit_factor": 1.4947,
+    "expectancy_R": 0.2511,
+    "edge_score": -0.2881,
+    "net_profit_R": 4.0174,
+    "max_drawdown_R": 5.2039,
+    "pnl_to_dd_ratio": 0.772,
+    "sharpe_ratio": 0.5548,
+    "meets_min_trade_count": false
+  },
+  "live_trades": []
+}

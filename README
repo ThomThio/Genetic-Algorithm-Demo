@@ -48,6 +48,24 @@ Defaults already match this workspace's public.prices schema (Ccy,
 Timeframe, Source, Datetime, Open, High, Low, Close, Volume) -- see
 strategy/data.py to remap if that ever changes.
 
+Local CSV mirror (works without network access, e.g. sandboxed environments
+whose network policy blocks the Supabase host -- the situation this was
+built for; also just faster for repeated runs):
+
+    # once network access is open, mirror Supabase rows to data/prices/*.csv:
+    ./.venv/bin/python -m strategy.fetch_supabase_csv --timeframe H1 --source-name FTMO_MT4_demo
+
+    # then run discovery against that local snapshot any time, no network needed:
+    ./.venv/bin/python -m strategy.run_discovery --source local \
+        --timeframe H1 --source-name FTMO_MT4_demo
+
+--source (synthetic/csv/supabase/local) is the one setting that switches
+between local files and the live database; its default can also be set via
+`export STRATEGY_SOURCE=local` instead of passing --source every time.
+--symbols is optional for supabase/local -- omitted, both auto-discover
+what's available (best-effort sample for supabase, directory listing for
+local).
+
 Module layout:
     strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
     strategy/genome.py         real-coded chromosome <-> entry-rule decoding
@@ -55,6 +73,7 @@ Module layout:
     strategy/fitness.py        Edge + the full backtest-basics metric set
     strategy/ga_engine.py      the GA loop itself (selection/crossover/mutation)
     strategy/interpretation.py plain-English rationale per archetype combo
+    strategy/fetch_supabase_csv.py  mirrors Supabase rows to data/prices/*.csv
     strategy/slicer.py         chronological train/test split
     strategy/robustness.py     vs-random / noise / permutation overfitting checks
     strategy/data.py           Supabase / CSV / synthetic-demo data loading

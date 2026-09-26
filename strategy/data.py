@@ -125,6 +125,69 @@ def list_supabase_symbols(table: str = DEFAULT_TABLE, symbol_col: str = DEFAULT_
     return sorted({row[symbol_col] for row in (resp.data or []) if row.get(symbol_col) is not None})
 
 
+# --- Local CSV cache ------------------------------------------------------
+# A local mirror of Supabase rows, written by strategy/fetch_supabase_csv.py
+# and read back here. Lets run_discovery.py run against a snapshot of the
+# real data (--source local) without hitting the network every time, and
+# keeps working when the Supabase host is unreachable (e.g. a sandboxed
+# environment whose network policy blocks it).
+
+DEFAULT_LOCAL_DIR = 'data/prices'
+
+
+def _local_cache_filename(symbol: str, timeframe: str, source: Optional[str]) -> str:
+    safe_source = source if source else 'any'
+    return f'{symbol}_{timeframe}_{safe_source}.csv'.replace('/', '-')
+
+
+def save_to_local_cache(df: pd.DataFrame, symbol: str, timeframe: str, source: Optional[str],
+                         cache_dir: str = DEFAULT_LOCAL_DIR) -> str:
+    """Writes a DataFrame already in the standard shape (timestamp index,
+    lowercase open/high/low/close/volume columns) to the local cache."""
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, _local_cache_filename(symbol, timeframe, source))
+    df.to_csv(path, index_label='timestamp')
+    return path
+
+
+def load_from_local_cache(symbol: str, timeframe: str = 'H1', source: Optional[str] = None,
+                           cache_dir: str = DEFAULT_LOCAL_DIR) -> pd.DataFrame:
+    path = os.path.join(cache_dir, _local_cache_filename(symbol, timeframe, source))
+    if not os.path.exists(path) and source is None:
+        # no source filter given: fall back to any single cached file for this symbol+timeframe
+        matches = [f for f in os.listdir(cache_dir) if f.startswith(f'{symbol}_{timeframe}_')] \
+            if os.path.isdir(cache_dir) else []
+        if len(matches) == 1:
+            path = os.path.join(cache_dir, matches[0])
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'no local cache file at {path}. Run strategy/fetch_supabase_csv.py first, or check '
+            f'--cache-dir/--symbols/--timeframe/--source-name match what was fetched.'
+        )
+    return load_from_csv(path, timestamp_col='timestamp')
+
+
+def list_local_symbols(cache_dir: str = DEFAULT_LOCAL_DIR, timeframe: Optional[str] = None,
+                        source: Optional[str] = None) -> List[str]:
+    if not os.path.isdir(cache_dir):
+        return []
+    symbols = set()
+    for fname in os.listdir(cache_dir):
+        if not fname.endswith('.csv'):
+            continue
+        stem = fname[:-4]
+        parts = stem.split('_')
+        if len(parts) < 3:
+            continue
+        sym, tf, src = parts[0], parts[1], '_'.join(parts[2:])
+        if timeframe is not None and tf != timeframe:
+            continue
+        if source is not None and src != source:
+            continue
+        symbols.add(sym)
+    return sorted(symbols)
+
+
 # --- Synthetic demo data -------------------------------------------------
 # NOT real market data. Used only so the GA + backtest + edge pipeline can
 # be demonstrated end-to-end before real Supabase credentials are wired up.

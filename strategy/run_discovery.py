@@ -12,10 +12,20 @@ Examples:
     python3 -m strategy.run_discovery --source supabase --symbols USDSGD,EURUSD \
         --timeframe H1 --source-name FTMO_MT4_demo
 
-    # a local CSV per symbol (timestamp,open,high,low,close,volume columns):
+    # against a local mirror of the above (see fetch_supabase_csv.py) --
+    # same rules, no network dependency, and works from cached snapshots:
+    python3 -m strategy.fetch_supabase_csv --timeframe H1 --source-name FTMO_MT4_demo
+    python3 -m strategy.run_discovery --source local --timeframe H1 --source-name FTMO_MT4_demo
+
+    # a one-off local CSV file (timestamp,open,high,low,close,volume columns):
     python3 -m strategy.run_discovery --source csv --csv-path data/SPY.csv --symbols SPY
+
+The default --source can also be set via the STRATEGY_SOURCE environment
+variable (e.g. `export STRATEGY_SOURCE=local`) instead of passing --source
+on every invocation.
 """
 import argparse
+import os
 import sys
 
 from . import data as data_mod
@@ -47,12 +57,16 @@ def _load_symbol(args, symbol: str):
             timeframe_col=args.timeframe_col, source=args.source_name,
             source_col=args.source_col,
         )
+    if args.source == 'local':
+        return data_mod.load_from_local_cache(
+            symbol, timeframe=args.timeframe, source=args.source_name, cache_dir=args.cache_dir,
+        )
     raise ValueError(f'unknown source: {args.source}')
 
 
 def run_for_symbol(args, symbol: str):
     slice_desc = args.source
-    if args.source == 'supabase':
+    if args.source in ('supabase', 'local'):
         slice_desc = f'{args.source}, timeframe={args.timeframe}, source={args.source_name}'
     print(f'\n=== {symbol} ({slice_desc}) ===', file=sys.stderr)
     df = _load_symbol(args, symbol)
@@ -151,18 +165,23 @@ def run_for_symbol(args, symbol: str):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--source', choices=['synthetic', 'csv', 'supabase'], default='synthetic')
+    p.add_argument('--source', choices=['synthetic', 'csv', 'supabase', 'local'],
+                    default=os.environ.get('STRATEGY_SOURCE', 'synthetic'),
+                    help='where to load price data from; default can also be set via '
+                         'the STRATEGY_SOURCE env var. "local" reads the CSV mirror written '
+                         'by fetch_supabase_csv.py (see --cache-dir).')
     p.add_argument('--symbols', default=None, help='comma-separated symbol list')
     p.add_argument('--csv-path', default=None)
+    p.add_argument('--cache-dir', default=data_mod.DEFAULT_LOCAL_DIR, help='local source only')
     p.add_argument('--table', default=data_mod.DEFAULT_TABLE, help='Supabase table name')
     p.add_argument('--symbol-col', default=data_mod.DEFAULT_SYMBOL_COL)
     p.add_argument('--timestamp-col', default=data_mod.DEFAULT_TIMESTAMP_COL)
     p.add_argument('--timeframe-col', default=data_mod.DEFAULT_TIMEFRAME_COL)
-    p.add_argument('--timeframe', default='H1', help='Supabase source only, e.g. H1/H4/D1')
+    p.add_argument('--timeframe', default='H1', help='supabase/local sources only, e.g. H1/H4/D1')
     p.add_argument('--source-col', default=data_mod.DEFAULT_SOURCE_COL)
     p.add_argument('--source-name', default=None,
-                    help='Supabase source only: filter the Source column (e.g. FTMO_MT4_demo). '
-                         'Leave unset only if the table has just one data source per symbol+timeframe.')
+                    help='supabase/local sources only: filter/match the data-source tag '
+                         '(e.g. FTMO_MT4_demo). Leave unset only if there is just one per symbol+timeframe.')
     p.add_argument('--n-bars', type=int, default=1500, help='synthetic source only')
     p.add_argument('--train-frac', type=float, default=0.7)
     p.add_argument('--pop-size', type=int, default=POP_SIZE)
@@ -189,8 +208,19 @@ def main():
         )
         print(f'Discovered symbols in {args.table} (timeframe={args.timeframe}, '
               f'source={args.source_name}): {symbols}', file=sys.stderr)
+    elif args.source == 'local':
+        symbols = data_mod.list_local_symbols(args.cache_dir, timeframe=args.timeframe, source=args.source_name)
+        print(f'Discovered symbols in {args.cache_dir} (timeframe={args.timeframe}, '
+              f'source={args.source_name}): {symbols}', file=sys.stderr)
     else:
         raise SystemExit('--symbols is required for csv/supabase sources')
+
+    if not symbols:
+        raise SystemExit(
+            f'no symbols to run for --source {args.source}. '
+            + ('Run fetch_supabase_csv.py first, or check --cache-dir/--timeframe/--source-name.'
+               if args.source == 'local' else 'Pass --symbols explicitly.')
+        )
 
     all_records = []
     for symbol in symbols:
