@@ -25,6 +25,7 @@ from .genome import materialize_signal
 from .indicators import compute_indicator_frame
 from .interpretation import interpret
 from .export import build_record, write_records
+from .report import write_reports
 from .slicer import train_test_split_chrono
 
 
@@ -135,6 +136,8 @@ def main():
     p.add_argument('--generations', type=int, default=GENERATIONS)
     p.add_argument('--seed', type=int, default=7)
     p.add_argument('--out-dir', default='output/strategies')
+    p.add_argument('--reports-dir', default='output/reports')
+    p.add_argument('--tracking-dir', default='output/live_tracking')
     args = p.parse_args()
 
     if args.symbols:
@@ -155,10 +158,15 @@ def main():
         sys.exit(1)
 
     path = write_records(all_records, args.out_dir, run_name=args.source)
+    report_paths = write_reports(all_records, args.reports_dir, args.tracking_dir, run_name=args.source)
 
     validated = [r for r in all_records if r['validated_out_of_sample']]
     print(f'\nWrote {len(all_records)} strategies ({len(validated)} validated out-of-sample) -> {path}',
           file=sys.stderr)
+    print(f'Wrote {len(report_paths)} report files -> {args.reports_dir}/ '
+          f'(index: {args.reports_dir}/summary_{args.source}.md)', file=sys.stderr)
+    print(f'Live-tracking ledgers seeded in {args.tracking_dir}/ -- log real trades with '
+          f'"python -m strategy.track_live --strategy-id <id> --r-multiple <R>"', file=sys.stderr)
     print('\nTop validated strategies by out-of-sample edge:', file=sys.stderr)
     for r in sorted(validated, key=lambda r: r['edge_score'], reverse=True)[:10]:
         oos = r['performance']['out_of_sample']

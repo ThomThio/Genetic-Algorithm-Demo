@@ -1,0 +1,23 @@
+{
+  "strategy_id": "27923464-4d30-4be4-82d4-d8b4c1edb327",
+  "symbol": "DEMO_MEAN_REVERT",
+  "rule_text": "RSI oversold (period=14, threshold=35.0) AND stochastic oversold (period=14, threshold=14.3)",
+  "risk_model": {
+    "stop_atr_mult": 1.89,
+    "target_R": 2.9,
+    "max_hold_bars": 59,
+    "entry_fill": "next_bar_open"
+  },
+  "backtest_baseline": {
+    "n_trades": 18,
+    "win_rate": 0.6111,
+    "win_rate_lb95": 0.3862,
+    "avg_win_R": 2.5147,
+    "avg_loss_R": 1.0,
+    "reward_risk": 2.5147,
+    "profit_factor": 3.9517,
+    "expectancy_R": 1.1479,
+    "edge_score": 0.3574
+  },
+  "live_trades": []
+}

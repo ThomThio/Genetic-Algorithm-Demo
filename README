@@ -58,5 +58,26 @@ Module layout:
     strategy/slicer.py         chronological train/test split
     strategy/data.py           Supabase / CSV / synthetic-demo data loading
     strategy/export.py         JSON schema matching the planned Supabase table
+    strategy/report.py         per-strategy Markdown scorecard + run summary
+    strategy/track_live.py     log live/paper trades, compare vs. backtest
     strategy/run_discovery.py  CLI that ties it all together
+
+Every run_discovery.py run, in addition to output/strategies/*.json, writes:
+    output/reports/<strategy_id>.md          fixed scorecard: rule, risk model,
+                                              interpretation, backtest stats
+    output/reports/summary_<run>.md          one-line-per-strategy index
+    output/live_tracking/<strategy_id>.json  seed ledger (backtest baseline +
+                                              empty live_trades log)
+
+To track real/paper trading results against a strategy's backtest baseline:
+
+    python -m strategy.track_live --strategy-id <id> --r-multiple 1.8 \
+        --entry-time 2026-09-20T14:30:00 --exit-time 2026-09-22T10:00:00 \
+        --note "clean trend day"
+
+This appends the trade to output/live_tracking/<id>.json and rewrites
+output/reports/<id>_live.md with the logged trades plus a live-vs-backtest
+comparison table (win rate, R:R, expectancy, edge score), computed with the
+exact same Edge metric used during discovery -- so "is this still working
+live" is a direct, apples-to-apples comparison, not a vibe check.
 
