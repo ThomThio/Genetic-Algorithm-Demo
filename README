@@ -66,6 +66,21 @@ between local files and the live database; its default can also be set via
 what's available (best-effort sample for supabase, directory listing for
 local).
 
+FTMO's MT4 demo feed is a "controlled" environment (limited history/
+reliability) -- for a real 20+ year walk-forward and robustness test, mirror
+free historical data from HistData.com instead (no signup, no API key):
+
+    ./.venv/bin/python -m strategy.fetch_histdata_csv --symbol USDSGD --years 20
+    ./.venv/bin/python -m strategy.run_discovery --source local \
+        --timeframe H1 --source-name histdata --symbols USDSGD
+
+See strategy/fetch_histdata_csv.py for the timezone caveat (HistData's fixed
+EST-derived UTC vs. MT4 broker time -- keep the two Source tags separate,
+never concatenate them into one series) and which other instruments
+HistData.com offers for free on the same terms (majors, several minors
+including USD/SGD, and commodities/indices such as XAU/USD, XAG/USD,
+WTI/USD, BCO/USD).
+
 Module layout:
     strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
     strategy/genome.py         real-coded chromosome <-> entry-rule decoding
@@ -74,6 +89,7 @@ Module layout:
     strategy/ga_engine.py      the GA loop itself (selection/crossover/mutation)
     strategy/interpretation.py plain-English rationale per archetype combo
     strategy/fetch_supabase_csv.py  mirrors Supabase rows to data/prices/*.csv
+    strategy/fetch_histdata_csv.py  mirrors free HistData.com H1 bars to data/prices/*.csv
     strategy/slicer.py         chronological train/test split
     strategy/robustness.py     vs-random / noise / permutation overfitting checks
     strategy/data.py           Supabase / CSV / synthetic-demo data loading
