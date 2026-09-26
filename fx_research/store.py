@@ -35,7 +35,13 @@ class SupabaseStore:
     """Writes to the results schema (default fx_research); see sql/fx_research_schema.sql."""
 
     def __init__(self, client, schema):
-        self.db = client.schema(schema)
+        self.client, self.schema = client, schema
+
+    @property
+    def db(self):
+        # supabase-py's .schema() mutates the shared client, and bar loading switches it to public,
+        # so the schema is re-selected on every access instead of cached.
+        return self.client.schema(self.schema)
 
     def start_run(self, run):
         self.db.table("scan_runs").insert(run).execute()

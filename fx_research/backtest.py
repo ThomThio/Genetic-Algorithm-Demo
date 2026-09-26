@@ -34,8 +34,20 @@ class FighterParams:
 MT4_DEFAULT = FighterParams("follow", 0.33, 0.33 * 1.8, 0.33 * 2.8, 8, 0, 48)
 
 
+# Round-trip cost in price units, from FTMO_MT4_demo quotes on 2026-09-26 (a weekend tick, so likely wider than
+# the weekday spread). Override or extend with FXR_SPREADS="USDSGD=0.0007,COFFEE.c=0.25".
+SPREADS = {"USDSGD": 0.00089, "COFFEE.c": 0.31}
+
+
 def spread_for(instrument):
-    """Rough round-trip cost in price units when no broker spread history is available."""
+    """Assumed spread in price units: FXR_SPREADS override, else the measured table, else a rough default."""
+    import os
+    for pair in os.environ.get("FXR_SPREADS", "").split(","):
+        name, _, value = pair.partition("=")
+        if name.strip() == instrument and value:
+            return float(value)
+    if instrument in SPREADS:
+        return SPREADS[instrument]
     return 0.015 if "JPY" in instrument else 0.00015
 
 
@@ -115,7 +127,7 @@ class Metrics:
         return d
 
 
-def evaluate(arrays, cases, params, spread):
+def evaluate(arrays, cases, params, spread, trades_out=None):
     """Run the strategy over every decision point.
 
     `cases` is a list of (start_bar, stop_bar, drift) tuples, one per decision.
@@ -127,6 +139,8 @@ def evaluate(arrays, cases, params, spread):
         r = simulate_trade(o, h, l, c, atr_v, start, stop, d, params, spread)
         if r is not None:
             rs.append(r)
+            if trades_out is not None:
+                trades_out.append((start, r))
     m = Metrics(decisions=len(cases), fills=len(rs))
     if rs:
         rs = np.array(rs)

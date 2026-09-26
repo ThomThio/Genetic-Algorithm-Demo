@@ -27,14 +27,17 @@ GENES = [
 CHROMO_LENGTH = sum(g[1] for g in GENES)
 
 
-def decode(bits):
+def decode(bits, direction_modes=None):
+    """direction_modes restricts the direction_mode gene to a subset (e.g. ["short"]
+    to force short-only strategies); the raw 2-bit value folds onto it via modulo."""
+    modes = direction_modes or DIRECTION_MODES
     values, pos = {}, 0
     for name, n, lo, hi, kind in GENES:
         raw = int(bits[pos:pos + n], 2)
         pos += n
         frac = raw / (2 ** n - 1)
         if kind == "choice":
-            values[name] = DIRECTION_MODES[raw]
+            values[name] = modes[raw % len(modes)]
         elif kind == "int":
             values[name] = int(round(lo + frac * (hi - lo)))
         else:
@@ -76,19 +79,20 @@ class GAResult:
     history: list  # best fitness per generation
 
 
-def run_ga(score_fn, population_size=40, generations=30, seed=None, seed_params=None):
-    """Maximise score_fn(FighterParams) -> float."""
+def run_ga(score_fn, population_size=40, generations=30, seed=None, seed_params=None, direction_modes=None):
+    """Maximise score_fn(FighterParams) -> float. direction_modes restricts the search
+    to a subset of DIRECTION_MODES (e.g. ["short"] for a shorts-only strategy)."""
     rng = random.Random(seed)
     cache = {}
 
     def score(bits):
         if bits not in cache:
-            cache[bits] = score_fn(decode(bits))
+            cache[bits] = score_fn(decode(bits, direction_modes))
         return cache[bits]
 
     population = [random_bits(rng) for _ in range(population_size)]
     if seed_params:
-        population[:len(seed_params)] = [encode(p) for p in seed_params]
+        population[:len(seed_params)] = [encode(p, direction_modes) for p in seed_params]
 
     history = []
     best_bits, best_fit = None, float("-inf")
@@ -112,16 +116,19 @@ def run_ga(score_fn, population_size=40, generations=30, seed=None, seed_params=
             nxt.extend([mutate(rng, c1), mutate(rng, c2)])
         population = nxt[:population_size]
 
-    return GAResult(decode(best_bits), best_fit, generations, len(cache), history)
+    return GAResult(decode(best_bits, direction_modes), best_fit, generations, len(cache), history)
 
 
-def encode(params):
-    """Nearest chromosome for a FighterParams (used to seed the population)."""
+def encode(params, direction_modes=None):
+    """Nearest chromosome for a FighterParams (used to seed the population). If params.direction_mode
+    isn't in direction_modes (e.g. seeding a shorts-only search with a "follow" default), it folds
+    onto direction_modes[0] - the other genes (k_atr, sl_atr, ...) still seed normally."""
+    modes = direction_modes or DIRECTION_MODES
     bits = ""
     for name, n, lo, hi, kind in GENES:
         v = getattr(params, name)
         if kind == "choice":
-            raw = DIRECTION_MODES.index(v)
+            raw = modes.index(v) if v in modes else 0
         else:
             frac = (min(max(v, lo), hi) - lo) / (hi - lo)
             raw = int(round(frac * (2 ** n - 1)))

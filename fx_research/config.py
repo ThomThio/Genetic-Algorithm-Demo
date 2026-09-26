@@ -67,6 +67,9 @@ class Settings:
     results_schema: str = os.environ.get("FXR_SCHEMA", "fx_research")
     prices_schema: str = os.environ.get("FXR_PRICES_SCHEMA", "public")
     prices_table: str = os.environ.get("FXR_PRICES_TABLE", "fx_prices")
+    # Only needed when fx_prices holds more than one source for the same Ccy/Timeframe
+    # (see sql/fx_prices_schema.sql); empty means don't filter by Source.
+    prices_source: str = os.environ.get("FXR_PRICES_SOURCE", "")
 
     # Scheduler (same timezone as MT4-TradeSignals).
     timezone: str = os.environ.get("FXR_TIMEZONE", "Asia/Singapore")

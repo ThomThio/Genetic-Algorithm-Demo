@@ -66,6 +66,19 @@ def trim_history(df, years):
     return df[df.index >= start]
 
 
+def resample_ohlc(bars, rule):
+    """Derive a coarser timeframe (e.g. '4h') from H1 bars by standard OHLCV aggregation.
+
+    Needed because the MT4 EA bridge (ZmqCommunicatorEA.ex4, compiled, no source available)
+    ignores the requested timeframe and always returns H1-spaced bars - confirmed by comparing
+    raw 'H1' vs 'H4' responses for the same instrument. H1 is the one timeframe verified correct,
+    so anything coarser is built from it here instead of trusted from the bridge.
+    """
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+    out = bars.resample(rule).agg(agg).dropna(subset=["Open"])
+    return out[OHLC]
+
+
 # ---------------------------------------------------------------------------
 # Bar sources
 # ---------------------------------------------------------------------------
@@ -79,18 +92,26 @@ def load_csv(instrument, csv_dir):
     return normalize_bars(pd.read_csv(matches[0]))
 
 
-def load_supabase(client, instrument, settings, since):
-    """Read H1 bars saved by MT4-TradeSignals (db.save_mkt_data) from public.fx_prices."""
+def load_supabase(client, instrument, settings, since, timeframe=None, source=None):
+    """Read bars from public.fx_prices: H1 as saved by MT4-TradeSignals (db.save_mkt_data),
+    which has no Timeframe column (leave `timeframe` unset there), or any timeframe/source
+    backfilled into this project's own fx_prices (see sql/fx_prices_schema.sql). Pass `source`
+    when more than one source shares the same Ccy/Timeframe, so bars from different origins
+    (e.g. FTMO demo vs. live) are never blended into one series."""
     rows, page, start = [], 1000, 0
     table = client.schema(settings.prices_schema).table(settings.prices_table)
     since_str = since.strftime("%Y-%m-%d %H:%M:%S%z")
     while True:
-        resp = (table.select("Datetime,Open,High,Low,Close,Volume")
-                .eq("Ccy", instrument)
-                .gte("Datetime", since_str)
-                .order("Datetime")
-                .range(start, start + page - 1)
-                .execute())
+        query = (table.select("Datetime,Open,High,Low,Close,Volume")
+                 .eq("Ccy", instrument)
+                 .gte("Datetime", since_str)
+                 .order("Datetime")
+                 .range(start, start + page - 1))
+        if timeframe:
+            query = query.eq("Timeframe", timeframe)
+        if source:
+            query = query.eq("Source", source)
+        resp = query.execute()
         rows.extend(resp.data or [])
         if not resp.data or len(resp.data) < page:
             break

@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from . import data
-from .backtest import MT4_DEFAULT, evaluate, fitness, spread_for, direction_for
+from .backtest import DIRECTION_MODES, MT4_DEFAULT, evaluate, fitness, spread_for, direction_for
 from .config import REGIMES, Settings
 from .features import RegimeThresholds, atr, build_windows, classify, rank_analogs
 from .optimizer import run_ga
@@ -43,7 +43,8 @@ class BarLoader:
             bars = self.mt4.load(instrument, s.timeframe, data.bars_needed(s.history_years, s.timeframe))
         elif s.bar_source == "supabase":
             since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(365.25 * s.history_years) + 14)
-            bars = data.load_supabase(self.client, instrument, s, since)
+            bars = data.load_supabase(self.client, instrument, s, since,
+                                       timeframe=s.timeframe, source=s.prices_source or None)
         else:
             raise ValueError(f"unknown bar source {s.bar_source}")
         return data.drop_weekends(data.trim_history(bars, s.history_years + 14 / 365.25))
@@ -57,8 +58,11 @@ def _iso(ts):
     return pd.Timestamp(ts).isoformat()
 
 
-def analyse_instrument(instrument, bars, s, run_id):
-    """Pure analysis step (no I/O). Returns (snapshot, analogs, strategy) records."""
+def analyse_instrument(instrument, bars, s, run_id, direction_modes=None, trace=None):
+    """Pure analysis step (no I/O). Returns (snapshot, analogs, strategy) records.
+
+    direction_modes restricts the GA to a subset of DIRECTION_MODES (e.g. ["short"]
+    for a shorts-only strategy); default (None) searches all of them."""
     min_days = s.window_days * 3 + s.forward_days
     windows, days, first_pos, last_pos = build_windows(bars, s.window_days)
     if len(days) < min_days or len(windows) < 3:
@@ -114,12 +118,17 @@ def analyse_instrument(instrument, bars, s, run_id):
     min_fills = max(3, len(train_cases) // 5)
     ga = run_ga(lambda p: fitness(evaluate(arrays, train_cases, p, spread), min_fills),
                 population_size=s.ga_population, generations=s.ga_generations,
-                seed=s.ga_seed, seed_params=[MT4_DEFAULT])
+                seed=s.ga_seed, seed_params=[MT4_DEFAULT], direction_modes=direction_modes)
     best = ga.params
 
     def metrics(p, cases):
         return evaluate(arrays, cases, p, spread).to_dict()
 
+    if trace is not None:   # per-trade (time, R) for each split, for run-level metrics (see runlog/metrics)
+        for name, cs in (("train", train_cases), ("validate", val_cases), ("all", all_cases)):
+            out = []
+            evaluate(arrays, cs, best, spread, trades_out=out)
+            trace[name] = sorted((bars.index[st], r) for st, r in out)
     m_train, m_val, m_all = metrics(best, train_cases), metrics(best, val_cases), metrics(best, all_cases)
     base_all = metrics(MT4_DEFAULT, all_cases)
     recommended = bool(m_train["mean_r"] > 0 and m_train["fills"] >= min_fills and
@@ -156,7 +165,8 @@ def analyse_instrument(instrument, bars, s, run_id):
         "train_metrics": m_train, "validate_metrics": m_val, "all_metrics": m_all,
         "baseline_params": MT4_DEFAULT.to_dict(), "baseline_metrics": base_all,
         "fitness": ga.fitness, "ga": {"generations": ga.generations, "evaluations": ga.evaluations,
-                                      "best_by_generation": ga.history},
+                                      "best_by_generation": ga.history,
+                                      "direction_modes": direction_modes or DIRECTION_MODES},
         "n_analogs": len(matches), "recommended": recommended,
         "live_hint": {
             "direction": "LONG" if direction > 0 else "SHORT",
@@ -170,7 +180,7 @@ def analyse_instrument(instrument, bars, s, run_id):
     return snapshot, analogs, strategy
 
 
-def run_scan(settings=None, store=None, loader=None):
+def run_scan(settings=None, store=None, loader=None, direction_modes=None):
     s = settings or Settings()
     client = None
     if store is None or loader is None:
@@ -193,8 +203,15 @@ def run_scan(settings=None, store=None, loader=None):
         for ins in s.instruments:
             try:
                 bars = loader.load(ins)
-                snap, analogs, strat = analyse_instrument(ins, bars, s, run_id)
+                trace = {}
+                snap, analogs, strat = analyse_instrument(ins, bars, s, run_id, direction_modes=direction_modes,
+                                                          trace=trace)
                 store.save_instrument(snap, analogs, strat)
+                if client is not None:   # every fit is also logged as a comparable run with the full metric set
+                    from .walkforward import log_fit_run
+                    log_fit_run(client, s.results_schema, ins, snap, strat, trace,
+                                ",".join(direction_modes) if direction_modes else "any", "backtest",
+                                s.prices_source or None, s.window_days, spread_for(ins))
                 results[ins] = strat
                 log.info("%s regime=%s params=%s train=%s", ins, snap["regime"], strat["params"],
                          strat["train_metrics"])
@@ -227,6 +244,9 @@ def main(argv=None):
     ap.add_argument("--csv-dir")
     ap.add_argument("--dry-run", action="store_true", help="write JSON files instead of Supabase")
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--direction", help="restrict the GA to one or more of "
+                     f"{DIRECTION_MODES}, comma-separated (e.g. 'short'); default: search all")
+    ap.add_argument("--window-days", type=int)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -239,11 +259,19 @@ def main(argv=None):
         s.csv_dir = args.csv_dir
     if args.seed is not None:
         s.ga_seed = args.seed
+    if args.window_days is not None:
+        s.window_days = args.window_days
+    direction_modes = None
+    if args.direction:
+        direction_modes = [x.strip() for x in args.direction.split(",")]
+        bad = [d for d in direction_modes if d not in DIRECTION_MODES]
+        if bad:
+            ap.error(f"--direction: unknown mode(s) {bad}, must be from {DIRECTION_MODES}")
     store = DryRunStore(s.dry_run_dir) if args.dry_run else None
     loader = None
     if args.dry_run and s.bar_source == "supabase" and s.has_supabase:
         loader = BarLoader(s, make_supabase_client(s))
-    run_id, results, errors = run_scan(s, store=store, loader=loader)
+    run_id, results, errors = run_scan(s, store=store, loader=loader, direction_modes=direction_modes)
     print(f"run {run_id}")
     print(summarize(results))
     for ins, e in errors.items():

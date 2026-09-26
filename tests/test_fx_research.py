@@ -189,3 +189,82 @@ def test_market_open_hours():
     assert not market_open(pd.Timestamp("2024-01-13 12:00", tz="UTC"))      # Saturday
     assert not market_open(pd.Timestamp("2024-01-12 22:30", tz="UTC"))      # Friday after 17:00 NY
     assert market_open(pd.Timestamp("2024-01-14 22:30", tz="UTC"))          # Sunday after 17:00 NY
+
+
+# --- execution: sizing and fighter prices -----------------------------------------
+
+from fx_research.execute import fighter_prices, size_lots
+
+SGD = {"tickSize": 0.00001, "tickValue": 0.78, "lotStep": 0.01, "minLotSize": 0.01,
+       "maxLotSize": 50.0, "digits": 5, "point": 0.00001, "stopLevel": 0}
+
+
+def test_size_lots_risks_three_percent_and_rounds_down():
+    # 100k * 3% = 3000 risk; 0.0023 stop = 230 ticks * 0.78 = 179.4 per lot -> 16.72 lots
+    lots = size_lots(100_000, 0.03, 1.2800, 1.2823, SGD)
+    assert lots == pytest.approx(16.72)
+    assert lots * 230 * 0.78 <= 3000
+
+
+def test_size_lots_zero_when_min_lot_exceeds_risk_and_caps_at_max():
+    assert size_lots(100, 0.03, 1.0, 1.5, SGD) == 0.0
+    assert size_lots(1e9, 0.03, 1.2800, 1.2823, SGD) == 50.0
+
+
+def test_fighter_prices_short_and_long():
+    hint = {"k_atr": 1.5, "sl_atr": 3.0, "tp_atr": 4.0}
+    limit, sl, tp = fighter_prices("SHORT", 1.27729, 0.001, 1.27819, SGD, hint)
+    assert (limit, sl, tp) == (1.27879, 1.28179, 1.27479)
+    limit, sl, tp = fighter_prices("LONG", 1.27819, 0.001, 1.27819, SGD, hint)
+    assert (limit, sl, tp) == (1.27669, 1.27369, 1.28069)
+
+
+# --- BuildAlpha-style metrics (ported from the other repo's compute_edge) ------------
+
+from fx_research.metrics import compute_edge
+
+
+def test_compute_edge_matches_hand_calculation():
+    e = compute_edge([1.0, 1.0, -0.5, -1.0])
+    assert e["n_trades"] == 4 and e["win_rate"] == 0.5
+    assert e["avg_win_R"] == 1.0 and e["avg_loss_R"] == 0.75
+    assert e["profit_factor"] == pytest.approx(2.0 / 1.5, abs=1e-4)
+    assert e["expectancy_R"] == 0.125 and e["net_profit_R"] == 0.5
+    assert e["max_drawdown_R"] == 1.5 and e["pnl_to_dd_ratio"] == pytest.approx(0.5 / 1.5, abs=1e-4)
+    assert e["meets_min_trade_count"] is False and e["win_rate_lb95"] < e["win_rate"]
+
+
+def test_compute_edge_empty_and_all_wins():
+    assert compute_edge([])["edge_score"] == -10.0
+    assert compute_edge([1.0, 2.0])["profit_factor"] == 999.0
+
+
+# --- live tracker ---------------------------------------------------------------
+
+from fx_research.track_live import resolve_trade
+
+
+def _live(direction="SHORT", status="pending", **kw):
+    return {"ticket": 7, "direction": direction, "status": status, "sl": 1.2810, "tp": 1.2750, **kw}
+
+
+def test_tracker_pending_stays_and_gone_is_cancelled():
+    empty = pd.DataFrame(columns=["ticket"])
+    pending = pd.DataFrame({"ticket": [7]})
+    assert resolve_trade(_live(), pending, empty, empty) is None
+    assert resolve_trade(_live(), empty, empty, empty) == {"status": "cancelled"}
+    assert resolve_trade(_live(status="filled"), empty, empty, empty) is None
+
+
+def test_tracker_filled_then_closed_at_target_gives_positive_r():
+    empty = pd.DataFrame(columns=["ticket"])
+    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"]})
+    upd = resolve_trade(_live(), empty, opened, empty)
+    assert upd["status"] == "filled" and upd["entry"] == 1.2790
+    closed = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "closeprice": [1.2750], "profit": [4000.0],
+                           "swap": [-10.0], "commission": [-5.0], "opentime": ["2026.09.28 10:00"],
+                           "closetime": ["2026.09.28 13:00"]})
+    upd = resolve_trade(_live(status="filled"), empty, empty, closed)
+    assert upd["status"] == "closed" and upd["exit_reason"] == "tp"
+    assert upd["r_multiple"] == pytest.approx(0.004 / 0.002)   # 40 pips won on a 20 pip stop
+    assert upd["pnl_usd"] == 3985.0
