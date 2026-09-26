@@ -1,0 +1,427 @@
+[
+  {
+    "strategy_id": "180f46b6-69f0-4130-9794-60409a321b60",
+    "created_at": "2026-09-26T14:33:40.793766+00:00",
+    "direction": "long",
+    "data_source": "synthetic",
+    "universe_slice": {
+      "symbol": "DEMO_TREND_PULLBACK",
+      "train_range": [
+        "2019-01-01 00:00:00",
+        "2021-11-15 00:00:00"
+      ],
+      "test_range": [
+        "2021-11-16 00:00:00",
+        "2023-02-08 00:00:00"
+      ]
+    },
+    "entry_rule": {
+      "logic": "AND",
+      "conditions": [
+        {
+          "key": "MACD_HIST_CROSS_UP",
+          "name": "MACD histogram crosses above zero",
+          "params": {},
+          "archetype": "trend_trigger"
+        }
+      ],
+      "rule_text": "MACD histogram crosses above zero"
+    },
+    "risk_model": {
+      "stop_atr_mult": 2.37,
+      "target_R": 3.71,
+      "max_hold_bars": 5,
+      "entry_fill": "next_bar_open"
+    },
+    "performance": {
+      "in_sample": {
+        "n_trades": 34,
+        "win_rate": 0.5588,
+        "win_rate_lb95": 0.3945,
+        "avg_win_R": 0.5763,
+        "avg_loss_R": 0.3501,
+        "reward_risk": 1.6461,
+        "profit_factor": 2.085,
+        "expectancy_R": 0.1676,
+        "edge_score": 0.0154,
+        "net_profit_R": 5.698,
+        "max_drawdown_R": 1.8287,
+        "pnl_to_dd_ratio": 3.1159,
+        "sharpe_ratio": 0.9782,
+        "meets_min_trade_count": true
+      },
+      "out_of_sample": {
+        "n_trades": 18,
+        "win_rate": 0.4444,
+        "win_rate_lb95": 0.2456,
+        "avg_win_R": 0.4767,
+        "avg_loss_R": 0.7328,
+        "reward_risk": 0.6505,
+        "profit_factor": 0.5204,
+        "expectancy_R": -0.1952,
+        "edge_score": -0.4357,
+        "net_profit_R": -3.5143,
+        "max_drawdown_R": 3.8001,
+        "pnl_to_dd_ratio": -0.9248,
+        "sharpe_ratio": -1.1408,
+        "meets_min_trade_count": false
+      }
+    },
+    "validated_out_of_sample": false,
+    "edge_score": -0.4357,
+    "interpretation": "A pure trend-following trigger (MACD histogram crosses above zero) with no additional regime filter -- expect more false signals in sideways markets, offset (if the edge holds) by larger average winners when a real trend does follow. Risk model: stop at 2.37x ATR from entry, target at 3.71R (i.e. 8.79x ATR), max hold 5 bars, entries filled at the next bar's open to avoid lookahead. Realized: 34 trades, 56% win rate (Wilson 95% lower bound 39%), reward:risk 1.65, expectancy +0.17R/trade, profit factor 2.08. In this sample both win rate and reward:risk pull their weight here -- a robust, 'high win-rate AND high R:R' combination rather than leaning on one factor. Out-of-sample check: 18 trades, 44% win rate, expectancy -0.20R -- does NOT clearly hold out of sample; treat as unvalidated.",
+    "ga_meta": {
+      "generation_found": 9,
+      "pop_size": 30,
+      "generations": 15,
+      "train_frac": 0.7,
+      "genome_signature": "MACD_HIST_CROSS_UP|stop=2.37|R=3.71|hold=5"
+    }
+  },
+  {
+    "strategy_id": "3bb1b6f2-b053-4f97-a409-7705363c7042",
+    "created_at": "2026-09-26T14:33:40.795068+00:00",
+    "direction": "long",
+    "data_source": "synthetic",
+    "universe_slice": {
+      "symbol": "DEMO_TREND_PULLBACK",
+      "train_range": [
+        "2019-01-01 00:00:00",
+        "2021-11-15 00:00:00"
+      ],
+      "test_range": [
+        "2021-11-16 00:00:00",
+        "2023-02-08 00:00:00"
+      ]
+    },
+    "entry_rule": {
+      "logic": "AND",
+      "conditions": [
+        {
+          "key": "MACD_BULLISH",
+          "name": "MACD line above signal",
+          "params": {},
+          "archetype": "trend_filter"
+        },
+        {
+          "key": "MACD_HIST_CROSS_UP",
+          "name": "MACD histogram crosses above zero",
+          "params": {},
+          "archetype": "trend_trigger"
+        }
+      ],
+      "rule_text": "MACD line above signal AND MACD histogram crosses above zero"
+    },
+    "risk_model": {
+      "stop_atr_mult": 2.37,
+      "target_R": 3.31,
+      "max_hold_bars": 5,
+      "entry_fill": "next_bar_open"
+    },
+    "performance": {
+      "in_sample": {
+        "n_trades": 34,
+        "win_rate": 0.5588,
+        "win_rate_lb95": 0.3945,
+        "avg_win_R": 0.5763,
+        "avg_loss_R": 0.3501,
+        "reward_risk": 1.6461,
+        "profit_factor": 2.085,
+        "expectancy_R": 0.1676,
+        "edge_score": 0.0154,
+        "net_profit_R": 5.698,
+        "max_drawdown_R": 1.8287,
+        "pnl_to_dd_ratio": 3.1159,
+        "sharpe_ratio": 0.9782,
+        "meets_min_trade_count": true
+      },
+      "out_of_sample": {
+        "n_trades": 18,
+        "win_rate": 0.4444,
+        "win_rate_lb95": 0.2456,
+        "avg_win_R": 0.4767,
+        "avg_loss_R": 0.7328,
+        "reward_risk": 0.6505,
+        "profit_factor": 0.5204,
+        "expectancy_R": -0.1952,
+        "edge_score": -0.4357,
+        "net_profit_R": -3.5143,
+        "max_drawdown_R": 3.8001,
+        "pnl_to_dd_ratio": -0.9248,
+        "sharpe_ratio": -1.1408,
+        "meets_min_trade_count": false
+      }
+    },
+    "validated_out_of_sample": false,
+    "edge_score": -0.4357,
+    "interpretation": "A pure trend-following trigger (MACD histogram crosses above zero) with no additional regime filter -- expect more false signals in sideways markets, offset (if the edge holds) by larger average winners when a real trend does follow. Risk model: stop at 2.37x ATR from entry, target at 3.31R (i.e. 7.84x ATR), max hold 5 bars, entries filled at the next bar's open to avoid lookahead. Realized: 34 trades, 56% win rate (Wilson 95% lower bound 39%), reward:risk 1.65, expectancy +0.17R/trade, profit factor 2.08. In this sample both win rate and reward:risk pull their weight here -- a robust, 'high win-rate AND high R:R' combination rather than leaning on one factor. Out-of-sample check: 18 trades, 44% win rate, expectancy -0.20R -- does NOT clearly hold out of sample; treat as unvalidated.",
+    "ga_meta": {
+      "generation_found": 11,
+      "pop_size": 30,
+      "generations": 15,
+      "train_frac": 0.7,
+      "genome_signature": "MACD_BULLISH&MACD_HIST_CROSS_UP|stop=2.37|R=3.31|hold=5"
+    }
+  },
+  {
+    "strategy_id": "c062a010-8855-4288-9fc2-77e3f5e0535f",
+    "created_at": "2026-09-26T14:33:41.613353+00:00",
+    "direction": "long",
+    "data_source": "synthetic",
+    "universe_slice": {
+      "symbol": "DEMO_MEAN_REVERT",
+      "train_range": [
+        "2019-01-01 00:00:00",
+        "2021-11-15 00:00:00"
+      ],
+      "test_range": [
+        "2021-11-16 00:00:00",
+        "2023-02-08 00:00:00"
+      ]
+    },
+    "entry_rule": {
+      "logic": "AND",
+      "conditions": [
+        {
+          "key": "RSI_OVERSOLD",
+          "name": "RSI oversold",
+          "params": {
+            "period": 14,
+            "threshold": 37.7
+          },
+          "archetype": "mean_reversion"
+        },
+        {
+          "key": "STOCH_OVERSOLD",
+          "name": "stochastic oversold",
+          "params": {
+            "period": 14,
+            "threshold": 21.0
+          },
+          "archetype": "mean_reversion"
+        }
+      ],
+      "rule_text": "RSI oversold (period=14, threshold=37.7) AND stochastic oversold (period=14, threshold=21.0)"
+    },
+    "risk_model": {
+      "stop_atr_mult": 0.98,
+      "target_R": 4.2,
+      "max_hold_bars": 18,
+      "entry_fill": "next_bar_open"
+    },
+    "performance": {
+      "in_sample": {
+        "n_trades": 30,
+        "win_rate": 0.5333,
+        "win_rate_lb95": 0.3614,
+        "avg_win_R": 2.6737,
+        "avg_loss_R": 1.0,
+        "reward_risk": 2.6737,
+        "profit_factor": 3.0557,
+        "expectancy_R": 0.9593,
+        "edge_score": 0.3278,
+        "net_profit_R": 28.7799,
+        "max_drawdown_R": 5.0,
+        "pnl_to_dd_ratio": 5.756,
+        "sharpe_ratio": 1.4704,
+        "meets_min_trade_count": true
+      },
+      "out_of_sample": {
+        "n_trades": 9,
+        "win_rate": 0.5556,
+        "win_rate_lb95": 0.2667,
+        "avg_win_R": 2.2646,
+        "avg_loss_R": 1.0,
+        "reward_risk": 2.2646,
+        "profit_factor": 2.8307,
+        "expectancy_R": 0.8136,
+        "edge_score": -0.1295,
+        "net_profit_R": 7.3228,
+        "max_drawdown_R": 2.3346,
+        "pnl_to_dd_ratio": 3.1366,
+        "sharpe_ratio": 1.0816,
+        "meets_min_trade_count": false
+      }
+    },
+    "validated_out_of_sample": false,
+    "edge_score": 0.3278,
+    "interpretation": "A standalone mean-reversion entry (RSI oversold (period=14, threshold=37.7); stochastic oversold (period=14, threshold=21.0)) with no trend filter -- this is the riskiest archetype here, since it will also fire against strong downtrends. Its edge, if real, likely comes from a high win rate on quick reversion trades rather than trend participation. Risk model: stop at 0.98x ATR from entry, target at 4.20R (i.e. 4.12x ATR), max hold 18 bars, entries filled at the next bar's open to avoid lookahead. Realized: 30 trades, 53% win rate (Wilson 95% lower bound 36%), reward:risk 2.67, expectancy +0.96R/trade, profit factor 3.06. In this sample both win rate and reward:risk pull their weight here -- a robust, 'high win-rate AND high R:R' combination rather than leaning on one factor. Out-of-sample check: 9 trades, 56% win rate, expectancy +0.81R -- does NOT clearly hold out of sample; treat as unvalidated.",
+    "ga_meta": {
+      "generation_found": 10,
+      "pop_size": 30,
+      "generations": 15,
+      "train_frac": 0.7,
+      "genome_signature": "RSI_OVERSOLD&STOCH_OVERSOLD|stop=0.98|R=4.20|hold=18"
+    }
+  },
+  {
+    "strategy_id": "5188cf64-42e8-4b96-83bc-8b14f05ecf1c",
+    "created_at": "2026-09-26T14:33:41.619830+00:00",
+    "direction": "long",
+    "data_source": "synthetic",
+    "universe_slice": {
+      "symbol": "DEMO_MEAN_REVERT",
+      "train_range": [
+        "2019-01-01 00:00:00",
+        "2021-11-15 00:00:00"
+      ],
+      "test_range": [
+        "2021-11-16 00:00:00",
+        "2023-02-08 00:00:00"
+      ]
+    },
+    "entry_rule": {
+      "logic": "AND",
+      "conditions": [
+        {
+          "key": "STOCH_OVERSOLD",
+          "name": "stochastic oversold",
+          "params": {
+            "period": 14,
+            "threshold": 17.7
+          },
+          "archetype": "mean_reversion"
+        }
+      ],
+      "rule_text": "stochastic oversold (period=14, threshold=17.7)"
+    },
+    "risk_model": {
+      "stop_atr_mult": 0.97,
+      "target_R": 3.69,
+      "max_hold_bars": 18,
+      "entry_fill": "next_bar_open"
+    },
+    "performance": {
+      "in_sample": {
+        "n_trades": 63,
+        "win_rate": 0.4444,
+        "win_rate_lb95": 0.3285,
+        "avg_win_R": 2.6656,
+        "avg_loss_R": 0.9615,
+        "reward_risk": 2.7723,
+        "profit_factor": 2.2179,
+        "expectancy_R": 0.6505,
+        "edge_score": 0.2299,
+        "net_profit_R": 40.9838,
+        "max_drawdown_R": 6.9066,
+        "pnl_to_dd_ratio": 5.934,
+        "sharpe_ratio": 1.5475,
+        "meets_min_trade_count": true
+      },
+      "out_of_sample": {
+        "n_trades": 24,
+        "win_rate": 0.375,
+        "win_rate_lb95": 0.2116,
+        "avg_win_R": 3.0426,
+        "avg_loss_R": 0.9351,
+        "reward_risk": 3.2538,
+        "profit_factor": 1.9523,
+        "expectancy_R": 0.5565,
+        "edge_score": -0.0934,
+        "net_profit_R": 13.3569,
+        "max_drawdown_R": 4.0,
+        "pnl_to_dd_ratio": 3.3392,
+        "sharpe_ratio": 1.1921,
+        "meets_min_trade_count": false
+      }
+    },
+    "validated_out_of_sample": false,
+    "edge_score": -0.0934,
+    "interpretation": "A standalone mean-reversion entry (stochastic oversold (period=14, threshold=17.7)) with no trend filter -- this is the riskiest archetype here, since it will also fire against strong downtrends. Its edge, if real, likely comes from a high win rate on quick reversion trades rather than trend participation. Risk model: stop at 0.97x ATR from entry, target at 3.69R (i.e. 3.58x ATR), max hold 18 bars, entries filled at the next bar's open to avoid lookahead. Realized: 63 trades, 44% win rate (Wilson 95% lower bound 33%), reward:risk 2.77, expectancy +0.65R/trade, profit factor 2.22. In this sample the edge is reward:risk-driven: it loses more often than it wins, but winners run for multiples of the risk taken on losers, so a handful of large trades carry the expectancy. Out-of-sample check: 24 trades, 38% win rate, expectancy +0.56R -- does NOT clearly hold out of sample; treat as unvalidated.",
+    "ga_meta": {
+      "generation_found": 11,
+      "pop_size": 30,
+      "generations": 15,
+      "train_frac": 0.7,
+      "genome_signature": "STOCH_OVERSOLD|stop=0.97|R=3.69|hold=18"
+    }
+  },
+  {
+    "strategy_id": "9bd57882-72e9-4e34-a0ad-76e44337dce4",
+    "created_at": "2026-09-26T14:33:42.475344+00:00",
+    "direction": "long",
+    "data_source": "synthetic",
+    "universe_slice": {
+      "symbol": "DEMO_VOL_BREAKOUT",
+      "train_range": [
+        "2019-01-01 00:00:00",
+        "2021-11-15 00:00:00"
+      ],
+      "test_range": [
+        "2021-11-16 00:00:00",
+        "2023-02-08 00:00:00"
+      ]
+    },
+    "entry_rule": {
+      "logic": "AND",
+      "conditions": [
+        {
+          "key": "SMA_FAST_ABOVE_SLOW",
+          "name": "fast SMA above slow SMA",
+          "params": {
+            "fast": 10,
+            "slow": 50
+          },
+          "archetype": "trend_filter"
+        },
+        {
+          "key": "MACD_BULLISH",
+          "name": "MACD line above signal",
+          "params": {},
+          "archetype": "trend_filter"
+        }
+      ],
+      "rule_text": "fast SMA above slow SMA (fast=10, slow=50) AND MACD line above signal"
+    },
+    "risk_model": {
+      "stop_atr_mult": 1.48,
+      "target_R": 3.25,
+      "max_hold_bars": 29,
+      "entry_fill": "next_bar_open"
+    },
+    "performance": {
+      "in_sample": {
+        "n_trades": 32,
+        "win_rate": 0.625,
+        "win_rate_lb95": 0.4525,
+        "avg_win_R": 2.5584,
+        "avg_loss_R": 1.0,
+        "reward_risk": 2.5584,
+        "profit_factor": 4.264,
+        "expectancy_R": 1.224,
+        "edge_score": 0.6103,
+        "net_profit_R": 39.168,
+        "max_drawdown_R": 2.0,
+        "pnl_to_dd_ratio": 19.584,
+        "sharpe_ratio": 2.1844,
+        "meets_min_trade_count": true
+      },
+      "out_of_sample": {
+        "n_trades": 16,
+        "win_rate": 0.375,
+        "win_rate_lb95": 0.1848,
+        "avg_win_R": 2.023,
+        "avg_loss_R": 0.812,
+        "reward_risk": 2.4912,
+        "profit_factor": 1.4947,
+        "expectancy_R": 0.2511,
+        "edge_score": -0.2881,
+        "net_profit_R": 4.0174,
+        "max_drawdown_R": 5.2039,
+        "pnl_to_dd_ratio": 0.772,
+        "sharpe_ratio": 0.5548,
+        "meets_min_trade_count": false
+      }
+    },
+    "validated_out_of_sample": false,
+    "edge_score": -0.2881,
+    "interpretation": "A standalone trend-state filter (fast SMA above slow SMA (fast=10, slow=50); MACD line above signal): it stays 'on' for as long as the condition holds, so it behaves more like a persistent regime gate than a precisely timed trigger -- expect it to fire often, in clusters, and for the per-trade edge to come from riding the broader trend rather than from precise entry timing. Risk model: stop at 1.48x ATR from entry, target at 3.25R (i.e. 4.81x ATR), max hold 29 bars, entries filled at the next bar's open to avoid lookahead. Realized: 32 trades, 62% win rate (Wilson 95% lower bound 45%), reward:risk 2.56, expectancy +1.22R/trade, profit factor 4.26. In this sample both win rate and reward:risk pull their weight here -- a robust, 'high win-rate AND high R:R' combination rather than leaning on one factor. Out-of-sample check: 16 trades, 38% win rate, expectancy +0.25R -- does NOT clearly hold out of sample; treat as unvalidated.",
+    "ga_meta": {
+      "generation_found": 12,
+      "pop_size": 30,
+      "generations": 15,
+      "train_frac": 0.7,
+      "genome_signature": "MACD_BULLISH&SMA_FAST_ABOVE_SLOW|stop=1.48|R=3.25|hold=29"
+    }
+  }
+]

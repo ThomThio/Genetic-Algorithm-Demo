@@ -2,15 +2,14 @@ This is a simple Python implementation of the Genetic Algorithm demonstration at
 The original code was in C++. I felt the need of coding the thing myself, and decided to do it in Python.
 
 The problem we solve is:
-    "For any given 'target' number, find an expression invlolving any legal combination of 
-    addition(+), subtraction(-), multiplication(*) and division(/) on digits that represents the 
+    "For any given 'target' number, find an expression invlolving any legal combination of
+    addition(+), subtraction(-), multiplication(*) and division(/) on digits that represents the
     given target number.
 
     e.g., for the target 15, "9 + 3 * 2" is a solution."
 
     **Important: In Fup's code, the evaluation of the expressions generated was simple, left to right
     evaluation. I have used normal arithmetic precedence based evaluation(see `expr.py')
-
 
 FX research scanner (fx_research/)
 ----------------------------------
@@ -23,3 +22,164 @@ See docs/FX_MT4_PLAN.md for how it ties into MT4-TradeSignals and TradeCoreV2.
     pip install -r requirements.txt
     python -m fx_research.scan --dry-run
     python -m fx_research.scheduler
+
+===============================================================================
+strategy/ -- GA-evolved long-only trading entry signals
+===============================================================================
+
+A second, unrelated use of the same genetic-algorithm idea: instead of
+evolving a bit-string that decodes to an arithmetic expression, it evolves a
+real-valued genome that decodes to a long-only entry rule (an AND of
+indicator conditions) plus a risk model (ATR stop, R-multiple target, max
+holding period). Fitness is "Edge": a Wilson-confidence-adjusted expectancy
+in R-multiples, computed from realized trades in an actual bar-by-bar
+backtest -- not a curve fit to a single number.
+
+Quickstart (synthetic data, no external dependencies beyond pandas/numpy):
+
+    python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+    ./.venv/bin/python -m strategy.run_discovery --source synthetic
+
+This runs the GA per synthetic symbol, evolves entry rules on the first 70%
+of the data, re-tests each surviving rule on the held-out last 30%
+(walk-forward validation -- the only real defense against reporting a
+curve-fit rule as having edge), and writes every discovered rule plus its
+in-sample and out-of-sample stats to output/strategies/latest.json.
+Rules that keep a positive edge out-of-sample are flagged
+"validated_out_of_sample": true; most won't be, and that's expected --
+finding a real, robust long-only edge is supposed to be hard.
+
+Real data (once network access to this workspace's Supabase project is open):
+
+    export SUPABASE_URL="https://<project>.supabase.co"
+    export SUPABASE_KEY="<anon-or-service-role-key>"
+    ./.venv/bin/python -m strategy.run_discovery --source supabase \
+        --symbols USDSGD,EURUSD --timeframe H1 --source-name FTMO_MT4_demo
+
+Defaults already match this workspace's public.prices schema (Ccy,
+Timeframe, Source, Datetime, Open, High, Low, Close, Volume) -- see
+strategy/data.py to remap if that ever changes.
+
+Local CSV mirror (works without network access, e.g. sandboxed environments
+whose network policy blocks the Supabase host -- the situation this was
+built for; also just faster for repeated runs):
+
+    # once network access is open, mirror Supabase rows to data/prices/*.csv:
+    ./.venv/bin/python -m strategy.fetch_supabase_csv --timeframe H1 --source-name FTMO_MT4_demo
+
+    # then run discovery against that local snapshot any time, no network needed:
+    ./.venv/bin/python -m strategy.run_discovery --source local \
+        --timeframe H1 --source-name FTMO_MT4_demo
+
+--source (synthetic/csv/supabase/local) is the one setting that switches
+between local files and the live database; its default can also be set via
+`export STRATEGY_SOURCE=local` instead of passing --source every time.
+--symbols is optional for supabase/local -- omitted, both auto-discover
+what's available (best-effort sample for supabase, directory listing for
+local).
+
+FTMO's MT4 demo feed is a "controlled" environment (limited history/
+reliability) -- for a real 20+ year walk-forward and robustness test, mirror
+free historical data from HistData.com instead (no signup, no API key):
+
+    ./.venv/bin/python -m strategy.fetch_histdata_csv --symbol USDSGD --years 20
+    ./.venv/bin/python -m strategy.run_discovery --source local \
+        --timeframe H1 --source-name histdata --symbols USDSGD
+
+See strategy/fetch_histdata_csv.py for the timezone caveat (HistData's fixed
+EST-derived UTC vs. MT4 broker time -- keep the two Source tags separate,
+never concatenate them into one series) and which other instruments
+HistData.com offers for free on the same terms (majors, several minors
+including USD/SGD, and commodities/indices such as XAU/USD, XAG/USD,
+WTI/USD, BCO/USD).
+
+Module layout:
+    strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
+    strategy/genome.py         real-coded chromosome <-> entry-rule decoding
+    strategy/backtest.py       long-only trade simulator (next-bar-open fills)
+    strategy/fitness.py        Edge + the full backtest-basics metric set
+    strategy/ga_engine.py      the GA loop itself (selection/crossover/mutation)
+    strategy/interpretation.py plain-English rationale per archetype combo
+    strategy/fetch_supabase_csv.py  mirrors Supabase rows to data/prices/*.csv
+    strategy/fetch_histdata_csv.py  mirrors free HistData.com H1 bars to data/prices/*.csv
+    strategy/slicer.py         chronological train/test split
+    strategy/robustness.py     vs-random / noise / permutation overfitting checks
+    strategy/data.py           Supabase / CSV / synthetic-demo data loading
+    strategy/export.py         JSON schema matching the planned Supabase table
+    strategy/report.py         per-strategy Markdown scorecard + run summary
+    strategy/track_live.py     log live/paper trades, compare vs. backtest
+    strategy/run_discovery.py  CLI that ties it all together
+
+-------------------------------------------------------------------------------
+Metrics computed everywhere edge is computed
+-------------------------------------------------------------------------------
+
+strategy/fitness.py's compute_edge() is the single place trades turn into
+numbers, and every context (GA search, in-sample, out-of-sample, robustness
+variants, live/paper tracking) funnels through it -- so these are always
+defined identically and comparable across environments, instruments, and
+strategies:
+
+    n_trades, meets_min_trade_count      trade count + the 30-trade
+                                          statistical-significance floor
+    win_rate, win_rate_lb95              raw and Wilson-95%-lower-bound win rate
+    avg_win_R, avg_loss_R, reward_risk   average winner/loser size and R:R
+    profit_factor                        gross win / gross loss
+    net_profit_R                         sum of R multiples (risk-normalized P&L;
+                                          no position sizing is modeled, so this
+                                          is P&L in units of risk-per-trade, not $)
+    max_drawdown_R                       worst peak-to-trough on the cumulative-R
+                                          equity curve
+    pnl_to_dd_ratio                      net_profit_R / max_drawdown_R
+    sharpe_ratio                         annualized using trade frequency (mean/std
+                                          of R multiples x sqrt(trades/year); None
+                                          if entry/exit timestamps aren't usable)
+    expectancy_R, edge_score             mean R/trade, and the Wilson-lower-bound-
+                                          adjusted version used to rank/select
+
+Data-splitting: every discovered rule is evolved on a 70/30 (configurable via
+--train-frac) chronological train/test split and reported as both
+performance.in_sample and performance.out_of_sample; validated_out_of_sample
+requires OOS edge_score > 0 with >= 10 OOS trades.
+
+Robustness/overfitting checks (strategy/robustness.py), run automatically in
+run_discovery.py on strategies that already passed the walk-forward gate
+(skip with --skip-robustness; tune sample sizes with --n-random/--n-noise/
+--n-shuffles) and stored under record["robustness"]:
+
+    vs_random_distribution   reruns the same risk model off of randomly timed
+                              entries matched to the real rule's signal count,
+                              many times over; reports the real rule's
+                              percentile rank against that null distribution
+                              (beats_random_at_95pct)
+    noise_test                reruns the same rule against small multiplicative
+                              perturbations of the OHLC data; reports the
+                              (P90-P10)/median spread of edge_score
+                              (robust_spread_lt_0_5, standard threshold <0.5)
+    permutation_test          shuffles the bar-to-bar log-return sequence
+                              (same distribution, randomized order), rebuilds a
+                              synthetic OHLC path, and reruns the rule; reports
+                              whether the real (ordered) edge clearly beats the
+                              shuffled distribution (depends_on_real_sequence_at_95pct)
+
+These are all in the Markdown scorecard (output/reports/<id>.md) and rolled
+up as a pass-count in the run summary index (output/reports/summary_<run>.md).
+
+Every run_discovery.py run, in addition to output/strategies/*.json, writes:
+    output/reports/<strategy_id>.md          fixed scorecard: rule, risk model,
+                                              interpretation, backtest stats
+    output/reports/summary_<run>.md          one-line-per-strategy index
+    output/live_tracking/<strategy_id>.json  seed ledger (backtest baseline +
+                                              empty live_trades log)
+
+To track real/paper trading results against a strategy's backtest baseline:
+
+    python -m strategy.track_live --strategy-id <id> --r-multiple 1.8 \
+        --entry-time 2026-09-20T14:30:00 --exit-time 2026-09-22T10:00:00 \
+        --note "clean trend day"
+
+This appends the trade to output/live_tracking/<id>.json and rewrites
+output/reports/<id>_live.md with the logged trades plus a live-vs-backtest
+comparison table (win rate, R:R, expectancy, edge score), computed with the
+exact same Edge metric used during discovery -- so "is this still working
+live" is a direct, apples-to-apples comparison, not a vibe check.
