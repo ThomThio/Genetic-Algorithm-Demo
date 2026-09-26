@@ -5,14 +5,15 @@ with validated edge to JSON.
 Examples:
     # demo run against synthetic data (no external dependencies beyond pip
     # install pandas numpy):
-    python3 strategy/run_discovery.py --source synthetic
+    python3 -m strategy.run_discovery --source synthetic
 
-    # once Supabase is connected and SUPABASE_URL / SUPABASE_KEY are set:
-    python3 strategy/run_discovery.py --source supabase --table ohlcv_daily \
-        --symbols BTCUSD,ETHUSD,SPY
+    # once Supabase is connected and SUPABASE_URL / SUPABASE_KEY are set
+    # (defaults already match this workspace's public.prices schema):
+    python3 -m strategy.run_discovery --source supabase --symbols USDSGD,EURUSD \
+        --timeframe H1 --source-name FTMO_MT4_demo
 
     # a local CSV per symbol (timestamp,open,high,low,close,volume columns):
-    python3 strategy/run_discovery.py --source csv --csv-path data/SPY.csv --symbols SPY
+    python3 -m strategy.run_discovery --source csv --csv-path data/SPY.csv --symbols SPY
 """
 import argparse
 import sys
@@ -41,13 +42,18 @@ def _load_symbol(args, symbol: str):
     if args.source == 'supabase':
         return data_mod.load_from_supabase(
             table=args.table, symbol=symbol, symbol_col=args.symbol_col,
-            timestamp_col=args.timestamp_col,
+            timestamp_col=args.timestamp_col, timeframe=args.timeframe,
+            timeframe_col=args.timeframe_col, source=args.source_name,
+            source_col=args.source_col,
         )
     raise ValueError(f'unknown source: {args.source}')
 
 
 def run_for_symbol(args, symbol: str):
-    print(f'\n=== {symbol} ({args.source}) ===', file=sys.stderr)
+    slice_desc = args.source
+    if args.source == 'supabase':
+        slice_desc = f'{args.source}, timeframe={args.timeframe}, source={args.source_name}'
+    print(f'\n=== {symbol} ({slice_desc}) ===', file=sys.stderr)
     df = _load_symbol(args, symbol)
     if len(df) < 300:
         print(f'  skipping {symbol}: only {len(df)} bars, need >=300', file=sys.stderr)
@@ -127,9 +133,15 @@ def main():
     p.add_argument('--source', choices=['synthetic', 'csv', 'supabase'], default='synthetic')
     p.add_argument('--symbols', default=None, help='comma-separated symbol list')
     p.add_argument('--csv-path', default=None)
-    p.add_argument('--table', default='ohlcv_daily', help='Supabase table name')
-    p.add_argument('--symbol-col', default='symbol')
-    p.add_argument('--timestamp-col', default='timestamp')
+    p.add_argument('--table', default=data_mod.DEFAULT_TABLE, help='Supabase table name')
+    p.add_argument('--symbol-col', default=data_mod.DEFAULT_SYMBOL_COL)
+    p.add_argument('--timestamp-col', default=data_mod.DEFAULT_TIMESTAMP_COL)
+    p.add_argument('--timeframe-col', default=data_mod.DEFAULT_TIMEFRAME_COL)
+    p.add_argument('--timeframe', default='H1', help='Supabase source only, e.g. H1/H4/D1')
+    p.add_argument('--source-col', default=data_mod.DEFAULT_SOURCE_COL)
+    p.add_argument('--source-name', default=None,
+                    help='Supabase source only: filter the Source column (e.g. FTMO_MT4_demo). '
+                         'Leave unset only if the table has just one data source per symbol+timeframe.')
     p.add_argument('--n-bars', type=int, default=1500, help='synthetic source only')
     p.add_argument('--train-frac', type=float, default=0.7)
     p.add_argument('--pop-size', type=int, default=POP_SIZE)
@@ -145,7 +157,12 @@ def main():
     elif args.source == 'synthetic':
         symbols = data_mod.SYNTHETIC_SYMBOLS
     elif args.source == 'supabase':
-        symbols = data_mod.list_supabase_symbols(args.table, args.symbol_col)
+        symbols = data_mod.list_supabase_symbols(
+            args.table, args.symbol_col, timeframe=args.timeframe, timeframe_col=args.timeframe_col,
+            source=args.source_name, source_col=args.source_col,
+        )
+        print(f'Discovered symbols in {args.table} (timeframe={args.timeframe}, '
+              f'source={args.source_name}): {symbols}', file=sys.stderr)
     else:
         raise SystemExit('--symbols is required for csv/supabase sources')
 

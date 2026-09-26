@@ -4,14 +4,14 @@ demo dataset used to exercise the whole pipeline end-to-end in the meantime.
 Supabase usage (once the connector/credentials are available):
 
     export SUPABASE_URL="https://<project>.supabase.co"
-    export SUPABASE_KEY="<service-role-or-anon-key>"
-    python3 strategy/run_discovery.py --source supabase --table ohlcv_daily \
-        --symbols BTCUSD,ETHUSD
+    export SUPABASE_KEY="<anon-or-service-role-key>"
+    python3 -m strategy.run_discovery --source supabase --table prices \
+        --symbols USDSGD,EURUSD --timeframe H1 --source-name FTMO_MT4_demo
 
-The loader expects (and you can remap via --col-* flags) a table with one
-row per bar: a symbol column, a timestamp column, and open/high/low/close/
-volume columns. Anything else (e.g. a `bid`/`ask` schema, multiple tables
-per symbol) needs a small adapter here once the real schema is known.
+The default table/column names below match this workspace's actual schema
+(public.prices): Ccy, Timeframe, Source, Datetime, Open, High, Low, Close,
+Volume. Override via the --*-col / --timeframe / --source-name CLI flags (or
+the matching kwargs here) if that ever changes.
 """
 import os
 from typing import List, Optional
@@ -20,6 +20,15 @@ import numpy as np
 import pandas as pd
 
 REQUIRED_COLS = ['open', 'high', 'low', 'close', 'volume']
+
+# public.prices column names in this workspace's Supabase project.
+DEFAULT_TABLE = 'prices'
+DEFAULT_SYMBOL_COL = 'Ccy'
+DEFAULT_TIMESTAMP_COL = 'Datetime'
+DEFAULT_TIMEFRAME_COL = 'Timeframe'
+DEFAULT_SOURCE_COL = 'Source'
+DEFAULT_PRICE_COL_MAP = {'Open': 'open', 'High': 'high', 'Low': 'low',
+                          'Close': 'close', 'Volume': 'volume'}
 
 
 def _finalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -39,13 +48,7 @@ def load_from_csv(path: str, timestamp_col: str = 'timestamp') -> pd.DataFrame:
     return _finalize(df)
 
 
-def load_from_supabase(table: str, symbol: Optional[str] = None,
-                        symbol_col: str = 'symbol', timestamp_col: str = 'timestamp',
-                        col_map: Optional[dict] = None, page_size: int = 5000) -> pd.DataFrame:
-    """Pulls one symbol's OHLCV rows from a Supabase table via the
-    supabase-py client, paginating with .range() since PostgREST caps
-    single-request row counts.
-    """
+def _supabase_client():
     from supabase import create_client  # imported lazily: optional dependency
 
     url = os.environ.get('SUPABASE_URL')
@@ -55,7 +58,22 @@ def load_from_supabase(table: str, symbol: Optional[str] = None,
             'SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) must be set '
             'in the environment to load from Supabase.'
         )
-    client = create_client(url, key)
+    return create_client(url, key)
+
+
+def load_from_supabase(table: str = DEFAULT_TABLE, symbol: Optional[str] = None,
+                        symbol_col: str = DEFAULT_SYMBOL_COL, timestamp_col: str = DEFAULT_TIMESTAMP_COL,
+                        timeframe: Optional[str] = None, timeframe_col: str = DEFAULT_TIMEFRAME_COL,
+                        source: Optional[str] = None, source_col: str = DEFAULT_SOURCE_COL,
+                        col_map: Optional[dict] = None, page_size: int = 5000) -> pd.DataFrame:
+    """Pulls one symbol's OHLCV rows from a Supabase table via the
+    supabase-py client, paginating with .range() since PostgREST caps
+    single-request row counts. Filters on symbol/timeframe/source (any of
+    which can be left as None to skip that filter) since a table like
+    public.prices holds multiple timeframes and data sources per currency
+    pair, not just one series per symbol.
+    """
+    client = _supabase_client()
 
     rows = []
     start = 0
@@ -63,6 +81,10 @@ def load_from_supabase(table: str, symbol: Optional[str] = None,
         q = client.table(table).select('*')
         if symbol is not None:
             q = q.eq(symbol_col, symbol)
+        if timeframe is not None:
+            q = q.eq(timeframe_col, timeframe)
+        if source is not None:
+            q = q.eq(source_col, source)
         q = q.order(timestamp_col).range(start, start + page_size - 1)
         resp = q.execute()
         batch = resp.data or []
@@ -72,26 +94,35 @@ def load_from_supabase(table: str, symbol: Optional[str] = None,
         start += page_size
 
     if not rows:
-        raise ValueError(f'no rows returned for table={table!r} symbol={symbol!r}')
+        raise ValueError(f'no rows returned for table={table!r} symbol={symbol!r} '
+                          f'timeframe={timeframe!r} source={source!r}')
 
     df = pd.DataFrame(rows)
-    if col_map:
-        df = df.rename(columns=col_map)
+    effective_col_map = {**DEFAULT_PRICE_COL_MAP, **(col_map or {})}
+    df = df.rename(columns=effective_col_map)
     df[timestamp_col] = pd.to_datetime(df[timestamp_col])
     df = df.set_index(timestamp_col)
     return _finalize(df)
 
 
-def list_supabase_symbols(table: str, symbol_col: str = 'symbol') -> List[str]:
-    from supabase import create_client
-
-    url = os.environ.get('SUPABASE_URL')
-    key = os.environ.get('SUPABASE_KEY') or os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
-    if not url or not key:
-        raise RuntimeError('SUPABASE_URL and SUPABASE_KEY must be set in the environment.')
-    client = create_client(url, key)
-    resp = client.table(table).select(symbol_col).execute()
-    return sorted({row[symbol_col] for row in (resp.data or [])})
+def list_supabase_symbols(table: str = DEFAULT_TABLE, symbol_col: str = DEFAULT_SYMBOL_COL,
+                           timeframe: Optional[str] = None, timeframe_col: str = DEFAULT_TIMEFRAME_COL,
+                           source: Optional[str] = None, source_col: str = DEFAULT_SOURCE_COL,
+                           sample_rows: int = 20000) -> List[str]:
+    """Best-effort distinct symbol listing: PostgREST has no native SELECT
+    DISTINCT, so this samples the most recent `sample_rows` rows (optionally
+    filtered by timeframe/source) and dedupes client-side. Fine for
+    discovering what's in the table; if a symbol trades rarely enough to
+    fall outside the sample window, pass it explicitly via --symbols instead.
+    """
+    client = _supabase_client()
+    q = client.table(table).select(symbol_col)
+    if timeframe is not None:
+        q = q.eq(timeframe_col, timeframe)
+    if source is not None:
+        q = q.eq(source_col, source)
+    resp = q.order('id', desc=True).limit(sample_rows).execute()
+    return sorted({row[symbol_col] for row in (resp.data or []) if row.get(symbol_col) is not None})
 
 
 # --- Synthetic demo data -------------------------------------------------
