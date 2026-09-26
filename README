@@ -11,3 +11,52 @@ The problem we solve is:
     **Important: In Fup's code, the evaluation of the expressions generated was simple, left to right
     evaluation. I have used normal arithmetic precedence based evaluation(see `expr.py')
 
+===============================================================================
+strategy/ -- GA-evolved long-only trading entry signals
+===============================================================================
+
+A second, unrelated use of the same genetic-algorithm idea: instead of
+evolving a bit-string that decodes to an arithmetic expression, it evolves a
+real-valued genome that decodes to a long-only entry rule (an AND of
+indicator conditions) plus a risk model (ATR stop, R-multiple target, max
+holding period). Fitness is "Edge": a Wilson-confidence-adjusted expectancy
+in R-multiples, computed from realized trades in an actual bar-by-bar
+backtest -- not a curve fit to a single number.
+
+Quickstart (synthetic data, no external dependencies beyond pandas/numpy):
+
+    python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+    ./.venv/bin/python -m strategy.run_discovery --source synthetic
+
+This runs the GA per synthetic symbol, evolves entry rules on the first 70%
+of the data, re-tests each surviving rule on the held-out last 30%
+(walk-forward validation -- the only real defense against reporting a
+curve-fit rule as having edge), and writes every discovered rule plus its
+in-sample and out-of-sample stats to output/strategies/latest.json.
+Rules that keep a positive edge out-of-sample are flagged
+"validated_out_of_sample": true; most won't be, and that's expected --
+finding a real, robust long-only edge is supposed to be hard.
+
+Real data (once Supabase is connected in this workspace):
+
+    export SUPABASE_URL="https://<project>.supabase.co"
+    export SUPABASE_KEY="<key>"
+    ./.venv/bin/python -m strategy.run_discovery --source supabase \
+        --table ohlcv_daily --symbols BTCUSD,ETHUSD
+
+See strategy/data.py for the expected table shape (symbol, timestamp, open,
+high, low, close, volume -- remap column names via --symbol-col/--timestamp-col
+or a col_map if the real schema differs).
+
+Module layout:
+    strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
+    strategy/genome.py         real-coded chromosome <-> entry-rule decoding
+    strategy/backtest.py       long-only trade simulator (next-bar-open fills)
+    strategy/fitness.py        Edge = Wilson-lower-bound-adjusted expectancy
+    strategy/ga_engine.py      the GA loop itself (selection/crossover/mutation)
+    strategy/interpretation.py plain-English rationale per archetype combo
+    strategy/slicer.py         chronological train/test split
+    strategy/data.py           Supabase / CSV / synthetic-demo data loading
+    strategy/export.py         JSON schema matching the planned Supabase table
+    strategy/run_discovery.py  CLI that ties it all together
+
