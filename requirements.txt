@@ -1,4 +1,9 @@
-pandas>=2.0
-numpy>=1.24
-supabase>=2.0
+numpy>=1.26
+pandas>=2.1
+pytz
+APScheduler>=3.10,<4
+supabase>=2.13
+# optional: only when FXR_BAR_SOURCE=mt4 (EACommunicator_API from MT4-TradeSignals)
+pyzmq
+pytest
 requests>=2.28  # strategy/fetch_histdata_csv.py only

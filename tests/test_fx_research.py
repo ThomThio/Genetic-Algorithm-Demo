@@ -1,0 +1,329 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from fx_research import data
+from fx_research.backtest import FighterParams, evaluate, flat_cost_fn, simulate_trade
+from fx_research.config import Settings
+from fx_research.features import RegimeThresholds, build_windows, classify, window_features
+from fx_research.optimizer import decode, encode, run_ga
+from fx_research.scan import analyse_instrument
+from fx_research.scheduler import market_open
+
+
+def synthetic_bars(days=800, seed=0, drift=0.0, start="2022-01-03 00:00"):
+    """H1 bars on a 24h/5d FX calendar (Sunday 22:00 UTC open to Friday 21:00 UTC close)."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range(start, periods=days * 24, freq="h", tz="UTC")
+    idx = idx[data.trading_dates(idx).dayofweek < 5]
+    r = rng.normal(drift, 0.001, len(idx))
+    close = 1.2 * np.exp(np.cumsum(r))
+    open_ = np.concatenate([[1.2], close[:-1]])
+    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0004, len(idx))))
+    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0004, len(idx))))
+    return pd.DataFrame({"Open": open_, "High": high, "Low": low, "Close": close,
+                         "Volume": 100.0}, index=idx)
+
+
+def bars_from(rows, start="2024-01-02 00:00"):
+    idx = pd.date_range(start, periods=len(rows), freq="h", tz="UTC")
+    return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close"], index=idx).assign(Volume=1.0)
+
+
+# --- trading days -----------------------------------------------------------
+
+def test_trading_date_rolls_at_5pm_new_york():
+    idx = pd.DatetimeIndex(["2024-01-07 22:00", "2024-01-05 21:30", "2024-01-05 22:30"], tz="UTC")
+    d = data.trading_dates(idx)
+    assert d[0].day_name() == "Monday"      # Sunday 17:00 NY open belongs to Monday
+    assert d[1].day_name() == "Friday"
+    assert d[2].day_name() == "Saturday"    # after the Friday close -> weekend
+
+
+def test_last_trading_days_skips_weekends():
+    idx = pd.date_range("2024-01-01", "2024-01-20", freq="h", tz="UTC")
+    df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0}, index=idx)
+    last = data.last_trading_days(df, 7)
+    days = data.trading_dates(last.index).unique()
+    assert len(days) == 7
+    assert all(d.dayofweek < 5 for d in days)
+    # 7 trading days back from Friday 19th spans the previous week's Thursday
+    assert days[0] == pd.Timestamp("2024-01-11")
+
+
+def test_normalize_bars_accepts_mt4_tradesignals_csv_columns():
+    raw = pd.DataFrame({"Datetime": ["2024-11-20 20:00:00+08:00"], "Open": [1.0], "High": [1.1],
+                        "Low": [0.9], "Close": [1.05], "Volume": [10], "original_tz": ["Asia/Dubai"]})
+    df = data.normalize_bars(raw)
+    assert list(df.columns) == data.OHLC
+    assert df.index[0] == pd.Timestamp("2024-11-20 12:00", tz="UTC")
+
+
+# --- regimes ------------------------------------------------------------------
+
+def test_classify_trend_and_sharp_trend():
+    th = RegimeThresholds()
+    up = synthetic_bars(8, seed=1, drift=0.0002)
+    feats, _ = window_features(up)
+    assert classify(feats, th) in ("Uptrend", "Sharp_Uptrend")
+    down = synthetic_bars(8, seed=1, drift=-0.0006)
+    feats, _ = window_features(down)
+    assert classify(feats, th) == "Sharp_Downtrend"
+
+
+def test_classify_sideways_for_mean_reverting_series():
+    # Ornstein-Uhlenbeck style: price keeps getting pulled back to 1.2
+    n, rng = 24 * 7, np.random.default_rng(2)
+    x = np.zeros(n)
+    for i in range(1, n):
+        x[i] = 0.3 * x[i - 1] + rng.normal(0, 0.001)
+    close = 1.2 + x
+    df = pd.DataFrame({"Open": close, "High": close + 1e-4, "Low": close - 1e-4, "Close": close},
+                      index=pd.date_range("2024-01-02", periods=n, freq="h", tz="UTC"))
+    feats, _ = window_features(df)
+    assert classify(feats, RegimeThresholds()) == "Sideways"
+
+
+def test_windows_are_n_trading_days_long():
+    bars = synthetic_bars(40)
+    windows, days, *_ = build_windows(bars, 7)
+    for w in windows[:5]:
+        span = data.trading_dates(bars.loc[w.start:w.end].index).unique()
+        assert len(span) == 7
+
+
+# --- fighter entry simulator --------------------------------------------------
+
+def arrays(df, a=0.001):
+    return (df["Open"].to_numpy(), df["High"].to_numpy(), df["Low"].to_numpy(),
+            df["Close"].to_numpy(), np.full(len(df), a), df.index)
+
+
+def test_long_limit_fills_then_hits_target():
+    # decision close 1.0000, ATR 0.001, limit at 0.9995, TP at +0.001
+    df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0002, 0.9994, 0.9996), (0.9996, 1.0010, 0.9996, 1.0008)])
+    p = FighterParams("long", k_atr=0.5, sl_atr=1.0, tp_atr=1.0, ttl_bars=5, reprice_every=0, max_hold_bars=10)
+    r = simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0))
+    assert r == pytest.approx(1.0)
+
+
+def test_limit_never_touched_is_not_a_trade():
+    df = bars_from([(1.0, 1.0, 1.0, 1.0)] + [(1.0, 1.001, 0.9999, 1.0)] * 5)
+    p = FighterParams("long", k_atr=0.5, sl_atr=1.0, tp_atr=1.0, ttl_bars=3)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0)) is None
+
+
+def test_fighter_reprice_chases_price_and_fills():
+    # price runs up; a static limit 0.5 ATR below never fills, a re-pricing one does
+    rows = [(1.0, 1.0, 1.0, 1.0), (1.0, 1.0010, 1.0000, 1.0010), (1.0010, 1.0020, 1.0010, 1.0020),
+            (1.0020, 1.0020, 1.0014, 1.0016), (1.0016, 1.0040, 1.0016, 1.0040)]
+    df = bars_from(rows)
+    static = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=10, reprice_every=0)
+    chase = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=10, reprice_every=1)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, static, flat_cost_fn(0.0)) is None
+    assert simulate_trade(*arrays(df), 0, len(df), 1, chase, flat_cost_fn(0.0)) == pytest.approx(1.0)
+
+
+def test_stop_wins_when_stop_and_target_share_a_bar():
+    df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 0.9995, 0.9995), (0.9995, 1.01, 0.99, 1.0)])
+    p = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=5)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0)) == pytest.approx(-1.0)
+
+
+def test_short_side_mirrors_long():
+    df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0006, 0.9998, 1.0004), (1.0004, 1.0004, 0.9990, 0.9992)])
+    p = FighterParams("short", 0.5, 1.0, 1.0, ttl_bars=5)
+    assert simulate_trade(*arrays(df), 0, len(df), -1, p, flat_cost_fn(0.0)) == pytest.approx(1.0)
+
+
+def test_spread_reduces_r():
+    df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0002, 0.9994, 0.9996), (0.9996, 1.0010, 0.9996, 1.0008)])
+    p = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=5)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0001)) == pytest.approx(0.9)
+
+
+# --- GA -------------------------------------------------------------------------
+
+def test_encode_decode_roundtrip():
+    p = FighterParams("fade", 0.33, 0.6, 0.92, 8, 2, 48)
+    q = decode(encode(p))
+    assert q.direction_mode == "fade"
+    assert q.k_atr == pytest.approx(0.33, abs=0.03)
+    assert q.ttl_bars == 8 and q.reprice_every == 2
+
+
+def test_ga_finds_known_optimum():
+    target = FighterParams("short", 0.8, 1.5, 2.0, 12, 3, 30)
+
+    def score(p):
+        return -(abs(p.k_atr - target.k_atr) + abs(p.sl_atr - target.sl_atr) + abs(p.tp_atr - target.tp_atr)
+                 + abs(p.ttl_bars - target.ttl_bars) / 10 + (p.direction_mode != "short"))
+
+    res = run_ga(score, population_size=40, generations=60, seed=3)
+    assert res.params.direction_mode == "short"
+    assert res.fitness > -1.0
+    assert res.history[-1] >= res.history[0]
+
+
+# --- end to end -----------------------------------------------------------------
+
+def test_analyse_instrument_three_years_no_lookahead():
+    bars = synthetic_bars(365 * 3 + 30, seed=7)
+    s = Settings()
+    s.ga_population, s.ga_generations, s.ga_seed = 16, 5, 1
+    snap, analogs, strat = analyse_instrument("EURUSD", bars, s, "run-1")
+    assert snap["regime"] in ("Uptrend", "Sharp_Uptrend", "Downtrend", "Sharp_Downtrend", "Sideways", "Random")
+    assert snap["history_windows"] > 700          # ~3 years of daily-stepped windows
+    assert len(analogs) == s.top_k
+    window_start = pd.Timestamp(snap["window_start"])
+    for a in analogs:
+        # matched window plus its forward period must finish before the current window starts
+        assert pd.Timestamp(a["window_end"]) + pd.Timedelta(days=s.forward_days) < window_start + pd.Timedelta(days=3)
+        assert pd.Timestamp(a["window_end"]) < window_start
+    assert strat["train_metrics"]["decisions"] > 0
+    assert strat["live_hint"]["direction"] in ("LONG", "SHORT")
+
+
+def test_market_open_hours():
+    assert market_open(pd.Timestamp("2024-01-10 12:00", tz="UTC"))          # Wednesday
+    assert not market_open(pd.Timestamp("2024-01-13 12:00", tz="UTC"))      # Saturday
+    assert not market_open(pd.Timestamp("2024-01-12 22:30", tz="UTC"))      # Friday after 17:00 NY
+    assert market_open(pd.Timestamp("2024-01-14 22:30", tz="UTC"))          # Sunday after 17:00 NY
+
+
+# --- execution: sizing and fighter prices -----------------------------------------
+
+from fx_research.execute import fighter_prices, size_lots
+
+SGD = {"tickSize": 0.00001, "tickValue": 0.78, "lotStep": 0.01, "minLotSize": 0.01,
+       "maxLotSize": 50.0, "digits": 5, "point": 0.00001, "stopLevel": 0}
+
+
+def test_size_lots_risks_three_percent_and_rounds_down():
+    # 100k * 3% = 3000 risk; 0.0023 stop = 230 ticks * 0.78 = 179.4 per lot -> 16.72 lots
+    lots = size_lots(100_000, 0.03, 1.2800, 1.2823, SGD)
+    assert lots == pytest.approx(16.72)
+    assert lots * 230 * 0.78 <= 3000
+
+
+def test_size_lots_zero_when_min_lot_exceeds_risk_and_caps_at_max():
+    assert size_lots(100, 0.03, 1.0, 1.5, SGD) == 0.0
+    assert size_lots(1e9, 0.03, 1.2800, 1.2823, SGD) == 50.0
+
+
+def test_fighter_prices_short_and_long():
+    hint = {"k_atr": 1.5, "sl_atr": 3.0, "tp_atr": 4.0}
+    limit, sl, tp = fighter_prices("SHORT", 1.27729, 0.001, 1.27819, SGD, hint)
+    assert (limit, sl, tp) == (1.27879, 1.28179, 1.27479)
+    limit, sl, tp = fighter_prices("LONG", 1.27819, 0.001, 1.27819, SGD, hint)
+    assert (limit, sl, tp) == (1.27669, 1.27369, 1.28069)
+
+
+# --- BuildAlpha-style metrics (ported from the other repo's compute_edge) ------------
+
+from fx_research.metrics import compute_edge
+
+
+def test_compute_edge_matches_hand_calculation():
+    e = compute_edge([1.0, 1.0, -0.5, -1.0])
+    assert e["n_trades"] == 4 and e["win_rate"] == 0.5
+    assert e["avg_win_R"] == 1.0 and e["avg_loss_R"] == 0.75
+    assert e["profit_factor"] == pytest.approx(2.0 / 1.5, abs=1e-4)
+    assert e["expectancy_R"] == 0.125 and e["net_profit_R"] == 0.5
+    assert e["max_drawdown_R"] == 1.5 and e["pnl_to_dd_ratio"] == pytest.approx(0.5 / 1.5, abs=1e-4)
+    assert e["meets_min_trade_count"] is False and e["win_rate_lb95"] < e["win_rate"]
+
+
+def test_compute_edge_empty_and_all_wins():
+    assert compute_edge([])["edge_score"] == -10.0
+    assert compute_edge([1.0, 2.0])["profit_factor"] == 999.0
+
+
+# --- live tracker ---------------------------------------------------------------
+
+from fx_research.track_live import resolve_trade
+
+
+def _live(direction="SHORT", status="pending", **kw):
+    return {"ticket": 7, "direction": direction, "status": status, "sl": 1.2810, "tp": 1.2750, **kw}
+
+
+def test_tracker_pending_stays_and_gone_is_cancelled():
+    empty = pd.DataFrame(columns=["ticket"])
+    pending = pd.DataFrame({"ticket": [7]})
+    assert resolve_trade(_live(), pending, empty, empty) is None
+    assert resolve_trade(_live(), empty, empty, empty) == {"status": "cancelled"}
+    assert resolve_trade(_live(status="filled"), empty, empty, empty) is None
+
+
+def test_tracker_filled_then_closed_at_target_gives_positive_r():
+    empty = pd.DataFrame(columns=["ticket"])
+    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"], "profit": [0.0]})
+    upd = resolve_trade(_live(), empty, opened, empty)
+    assert upd["status"] == "filled" and upd["entry"] == 1.2790
+    closed = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "closeprice": [1.2750], "profit": [4000.0],
+                           "swap": [-10.0], "commission": [-5.0], "opentime": ["2026.09.28 10:00"],
+                           "closetime": ["2026.09.28 13:00"]})
+    upd = resolve_trade(_live(status="filled"), empty, empty, closed)
+    assert upd["status"] == "closed" and upd["exit_reason"] == "tp"
+    assert upd["r_multiple"] == pytest.approx(0.004 / 0.002)   # 40 pips won on a 20 pip stop
+    assert upd["pnl_usd"] == 3985.0
+
+
+def test_tracker_open_position_only_reports_state_and_costs():
+    empty = pd.DataFrame(columns=["ticket"])
+    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"],
+                           "profit": [1500.0], "swap": [-20.0], "commission": [-10.0]})
+    upd = resolve_trade(_live(status="filled"), empty, opened, empty)
+    assert upd == {"open_costs_usd": -30.0}          # no P&L from MT4's profit field
+    closed = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "closeprice": [1.2750], "profit": [4000.0],
+                           "opentime": ["2026.09.28 10:00"], "closetime": ["2026.09.28 13:00"]})
+    upd = resolve_trade(_live(status="filled"), empty, empty, closed)
+    assert upd["open_pnl_usd"] is None and upd["pnl_usd"] == 4000.0
+
+
+from fx_research.track_live import floating_pnl
+
+SGD_SYM = {"tickSize": 0.00001, "tickValue": 0.78}
+
+
+def test_floating_pnl_marks_short_at_ask_and_long_at_bid():
+    tick = {"bid": 1.27900, "ask": 1.27950, "last": 1.27920}
+    short = {"direction": "SHORT", "entry": 1.28000, "lots": 2.0, "sl": 1.28200}
+    p = floating_pnl(short, tick, SGD_SYM)               # short closes at the ask: +0.0005 x 2 lots
+    assert p["mark_price"] == 1.27950 and p["last_price"] == 1.27920
+    assert p["open_pnl_usd"] == pytest.approx(0.0005 / 0.00001 * 0.78 * 2)   # 50 ticks x 0.78 x 2 lots = 78
+    assert p["open_r"] == pytest.approx(0.0005 / 0.0020)
+    long_ = {"direction": "LONG", "entry": 1.28000, "lots": 1.0, "sl": 1.27800}
+    p = floating_pnl(long_, tick, SGD_SYM)               # long closes at the bid: -0.0010
+    assert p["mark_price"] == 1.27900 and p["open_pnl_usd"] == pytest.approx(-100 * 0.78)
+    assert p["open_r"] == pytest.approx(-0.5)
+
+
+# --- risk sizing includes the spread; broker minimum stop distance ------------------------
+
+from fx_research.execute import size_lots_info
+
+
+def test_size_lots_includes_spread_in_risk():
+    # stop 0.0023 away + 0.0009 spread = 0.0032 -> 320 ticks x 0.78 = 249.6 per lot -> 12.01 lots (3% of 100k)
+    info = size_lots_info(100_000, 0.03, 1.2800, 1.2823, SGD, spread=0.0009)
+    assert info["lots"] == pytest.approx(12.01) and not info["capped"]
+    assert info["risk_usd"] == pytest.approx(12.01 * 249.6, abs=0.01) and info["risk_usd"] <= 3000
+    assert size_lots(100_000, 0.03, 1.2800, 1.2823, SGD) > info["lots"]   # ignoring the spread oversizes
+
+
+def test_size_lots_info_reports_cap_and_min_lot():
+    big = size_lots_info(1e9, 0.03, 1.2800, 1.2823, SGD, spread=0.0009)
+    assert big["capped"] and big["lots"] == 50.0 and big["risk_usd"] < 1e9 * 0.03
+    tiny = size_lots_info(100, 0.03, 1.0, 1.5, SGD)
+    assert tiny["below_min"] and tiny["lots"] == 0.0
+
+
+def test_fighter_prices_enforce_broker_stop_level():
+    sym = {**SGD, "stopLevel": 100}                      # 100 points = 0.001
+    hint = {"k_atr": 1.0, "sl_atr": 0.1, "tp_atr": 0.2}  # would put SL/TP 0.0001 / 0.0002 away
+    limit, sl, tp = fighter_prices("SHORT", 1.2800, 0.001, 1.2805, sym, hint)
+    assert sl - limit >= 0.001 - 1e-9 and limit - tp >= 0.001 - 1e-9
+    limit, sl, tp = fighter_prices("LONG", 1.2800, 0.001, 1.2805, sym, hint)
+    assert limit - sl >= 0.001 - 1e-9 and tp - limit >= 0.001 - 1e-9

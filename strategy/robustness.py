@@ -38,22 +38,23 @@ NOISE_SPREAD_ROBUST_THRESHOLD = 0.5   # (p90-p10)/median on edge_score; standard
 PERCENTILE_SIGNIFICANT = 95.0
 
 
-def _run_rule(df: pd.DataFrame, spec: StrategySpec, ind: Optional[pd.DataFrame] = None):
+def _run_rule(df: pd.DataFrame, spec: StrategySpec, ind: Optional[pd.DataFrame] = None, cost_bps: float = 0.0):
     if ind is None:
         ind = compute_indicator_frame(df)
     signal, _ = materialize_signal(spec, df, ind)
-    trades = run_backtest(df, ind['atr_14'], signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars)
+    trades = run_backtest(df, ind['atr_14'], signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars,
+                           cost_bps=cost_bps)
     return signal, trades
 
 
 def random_signal_benchmark(df: pd.DataFrame, spec: StrategySpec, n_random: int = 200,
-                             seed: Optional[int] = None) -> dict:
+                             seed: Optional[int] = None, cost_bps: float = 0.0) -> dict:
     """Percentile rank of the real rule's edge_score against n_random
     randomly timed entry series of the same size and risk model.
     """
     rng = np.random.default_rng(seed)
     ind = compute_indicator_frame(df)
-    real_signal, real_trades = _run_rule(df, spec, ind)
+    real_signal, real_trades = _run_rule(df, spec, ind, cost_bps=cost_bps)
     real_edge = compute_edge(real_trades)
     n_signals = int(real_signal.sum())
 
@@ -66,7 +67,8 @@ def random_signal_benchmark(df: pd.DataFrame, spec: StrategySpec, n_random: int 
         chosen = rng.choice(valid_idx, size=n_signals, replace=False)
         rand_signal = pd.Series(False, index=df.index)
         rand_signal.iloc[chosen] = True
-        trades = run_backtest(df, ind['atr_14'], rand_signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars)
+        trades = run_backtest(df, ind['atr_14'], rand_signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars,
+                               cost_bps=cost_bps)
         edge = compute_edge(trades)
         if edge.n_trades > 0:
             random_edge_scores.append(edge.edge_score)
@@ -103,7 +105,7 @@ def _perturb_ohlc(df: pd.DataFrame, noise_pct: float, rng: np.random.Generator) 
 
 
 def noise_test(df: pd.DataFrame, spec: StrategySpec, n_variants: int = 100,
-                noise_pct: float = 0.05, seed: Optional[int] = None) -> dict:
+                noise_pct: float = 0.05, seed: Optional[int] = None, cost_bps: float = 0.0) -> dict:
     """(p90-p10)/median spread of edge_score across noised-OHLC variants.
     Standard threshold: spread < 0.5 on daily-equivalent data counts as robust.
     """
@@ -112,7 +114,7 @@ def noise_test(df: pd.DataFrame, spec: StrategySpec, n_variants: int = 100,
     for _ in range(n_variants):
         noisy = _perturb_ohlc(df, noise_pct, rng)
         ind = compute_indicator_frame(noisy)
-        _, trades = _run_rule(noisy, spec, ind)
+        _, trades = _run_rule(noisy, spec, ind, cost_bps=cost_bps)
         edge = compute_edge(trades)
         if edge.n_trades > 0:
             edge_scores.append(edge.edge_score)
@@ -138,7 +140,7 @@ def noise_test(df: pd.DataFrame, spec: StrategySpec, n_variants: int = 100,
 
 
 def permutation_test(df: pd.DataFrame, spec: StrategySpec, n_shuffles: int = 100,
-                       seed: Optional[int] = None) -> dict:
+                       seed: Optional[int] = None, cost_bps: float = 0.0) -> dict:
     """Shuffles bar-to-bar log returns (same distribution, randomized order),
     rebuilds a synthetic OHLC path, and reruns the rule. Percentile rank of
     the real (ordered) edge_score vs the shuffled distribution -- high means
@@ -147,7 +149,7 @@ def permutation_test(df: pd.DataFrame, spec: StrategySpec, n_shuffles: int = 100
     """
     rng = np.random.default_rng(seed)
     ind = compute_indicator_frame(df)
-    _, real_trades = _run_rule(df, spec, ind)
+    _, real_trades = _run_rule(df, spec, ind, cost_bps=cost_bps)
     real_edge = compute_edge(real_trades)
 
     close = df['close'].to_numpy()
@@ -172,7 +174,7 @@ def permutation_test(df: pd.DataFrame, spec: StrategySpec, n_shuffles: int = 100
         synth_df = pd.DataFrame({'open': synth_open, 'high': synth_high, 'low': synth_low,
                                   'close': synth_close, 'volume': volume}, index=df.index)
         s_ind = compute_indicator_frame(synth_df)
-        _, s_trades = _run_rule(synth_df, spec, s_ind)
+        _, s_trades = _run_rule(synth_df, spec, s_ind, cost_bps=cost_bps)
         s_edge = compute_edge(s_trades)
         if s_edge.n_trades > 0:
             shuffled_edge_scores.append(s_edge.edge_score)
@@ -195,9 +197,9 @@ def permutation_test(df: pd.DataFrame, spec: StrategySpec, n_shuffles: int = 100
 
 
 def run_all(df: pd.DataFrame, spec: StrategySpec, n_random: int = 200, n_noise: int = 100,
-             n_shuffles: int = 100, seed: Optional[int] = None) -> dict:
+             n_shuffles: int = 100, seed: Optional[int] = None, cost_bps: float = 0.0) -> dict:
     return {
-        'vs_random_distribution': random_signal_benchmark(df, spec, n_random=n_random, seed=seed),
-        'noise_test': noise_test(df, spec, n_variants=n_noise, seed=seed),
-        'permutation_test': permutation_test(df, spec, n_shuffles=n_shuffles, seed=seed),
+        'vs_random_distribution': random_signal_benchmark(df, spec, n_random=n_random, seed=seed, cost_bps=cost_bps),
+        'noise_test': noise_test(df, spec, n_variants=n_noise, seed=seed, cost_bps=cost_bps),
+        'permutation_test': permutation_test(df, spec, n_shuffles=n_shuffles, seed=seed, cost_bps=cost_bps),
     }
