@@ -93,6 +93,19 @@ HistData.com offers for free on the same terms (majors, several minors
 including USD/SGD, and commodities/indices such as XAU/USD, XAG/USD,
 WTI/USD, BCO/USD).
 
+To write it straight into the same Supabase public.prices table as a new,
+separately-tagged Source instead of a local file -- for direct side-by-side
+comparison against the existing FTMO_MT4_demo rows -- use --dest supabase.
+This assumes the Supabase key's RLS policy already permits inserts, and
+does NOT de-duplicate: don't re-run it for the same symbol/range.
+
+    export SUPABASE_URL="https://<project>.supabase.co"
+    export SUPABASE_KEY="<key with insert permission on prices>"
+    ./.venv/bin/python -m strategy.fetch_histdata_csv --symbol USDSGD --years 20 \
+        --dest supabase --supabase-source-name HistData_Free
+    ./.venv/bin/python -m strategy.run_discovery --source supabase \
+        --timeframe H1 --source-name HistData_Free --symbols USDSGD
+
 Module layout:
     strategy/indicators.py     SMA/EMA/RSI/MACD/Bollinger/ADX/Stochastic/ATR
     strategy/genome.py         real-coded chromosome <-> entry-rule decoding

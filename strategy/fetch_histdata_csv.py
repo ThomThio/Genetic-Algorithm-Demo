@@ -29,10 +29,20 @@ line up with FTMO MT4 broker-time bars (typically UTC+2/+3, DST-shifting) --
 keep them as distinct Source tags ("histdata" vs "FTMO_MT4_demo") exactly as
 the schema already supports; never concatenate the two into one series.
 
-Usage:
+Usage (local CSV cache, the default):
     python3 -m strategy.fetch_histdata_csv --symbol USDSGD --years 20
     python3 -m strategy.run_discovery --source local --timeframe H1 \
         --source-name histdata --symbols USDSGD
+
+Usage (write straight into the same Supabase public.prices table as a new,
+separately-tagged Source, for side-by-side comparison against e.g. the
+FTMO_MT4_demo rows already there -- assumes the configured Supabase key's
+RLS policy already permits inserts, and does NOT de-duplicate: re-running
+this for the same symbol/range will create duplicate rows):
+    export SUPABASE_URL="https://<project>.supabase.co"
+    export SUPABASE_KEY="<key with insert permission on prices>"
+    python3 -m strategy.fetch_histdata_csv --symbol USDSGD --years 20 \
+        --dest supabase --supabase-source-name HistData_Free
 """
 import argparse
 import io
@@ -160,8 +170,14 @@ def main():
     p.add_argument('--symbol', required=True, help='e.g. USDSGD, EURUSD, XAUUSD')
     p.add_argument('--years', type=int, default=20)
     p.add_argument('--sleep', type=float, default=1.0, help='seconds between month requests')
-    p.add_argument('--cache-dir', default=data_mod.DEFAULT_LOCAL_DIR)
-    p.add_argument('--source-name', default=HISTDATA_SOURCE_NAME)
+    p.add_argument('--dest', choices=['csv', 'supabase'], default='csv',
+                    help="'csv' (default) writes to the local cache (--cache-dir); 'supabase' "
+                         'inserts directly into the same public.prices table as a new Source, '
+                         'for side-by-side comparison against e.g. FTMO_MT4_demo.')
+    p.add_argument('--cache-dir', default=data_mod.DEFAULT_LOCAL_DIR, help='--dest csv only')
+    p.add_argument('--table', default=data_mod.DEFAULT_TABLE, help='--dest supabase only')
+    p.add_argument('--source-name', default=HISTDATA_SOURCE_NAME, help='--dest csv only')
+    p.add_argument('--supabase-source-name', default='HistData_Free', help='--dest supabase only')
     args = p.parse_args()
 
     def progress(year, month, n_bars, error):
@@ -174,11 +190,25 @@ def main():
           file=sys.stderr)
     df = fetch_symbol_histdata(args.symbol, years=args.years, sleep_seconds=args.sleep,
                                 progress_cb=progress)
-    path = data_mod.save_to_local_cache(df, args.symbol.upper(), 'H1', args.source_name, args.cache_dir)
-    print(f'\nWrote {len(df)} H1 bars [{df.index[0]} .. {df.index[-1]}] -> {path}', file=sys.stderr)
-    print('Run discovery against it with:', file=sys.stderr)
-    print(f'  python3 -m strategy.run_discovery --source local --timeframe H1 '
-          f'--source-name {args.source_name} --symbols {args.symbol.upper()}', file=sys.stderr)
+    symbol = args.symbol.upper()
+
+    if args.dest == 'supabase':
+        print(f'\nInserting {len(df)} H1 bars into {args.table} as '
+              f'Ccy={symbol}, Timeframe=H1, Source={args.supabase_source_name} '
+              f'(plain insert, no de-dup -- do not re-run for the same range)...', file=sys.stderr)
+        n = data_mod.insert_rows_to_supabase(df, symbol, 'H1', args.supabase_source_name,
+                                              table=args.table)
+        print(f'Inserted {n} rows into {args.table}.', file=sys.stderr)
+        print('Read it back / run discovery against it with:', file=sys.stderr)
+        print(f'  python3 -m strategy.run_discovery --source supabase --table {args.table} '
+              f'--timeframe H1 --source-name {args.supabase_source_name} --symbols {symbol}',
+              file=sys.stderr)
+    else:
+        path = data_mod.save_to_local_cache(df, symbol, 'H1', args.source_name, args.cache_dir)
+        print(f'\nWrote {len(df)} H1 bars [{df.index[0]} .. {df.index[-1]}] -> {path}', file=sys.stderr)
+        print('Run discovery against it with:', file=sys.stderr)
+        print(f'  python3 -m strategy.run_discovery --source local --timeframe H1 '
+              f'--source-name {args.source_name} --symbols {symbol}', file=sys.stderr)
 
 
 if __name__ == '__main__':

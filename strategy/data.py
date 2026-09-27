@@ -125,6 +125,44 @@ def list_supabase_symbols(table: str = DEFAULT_TABLE, symbol_col: str = DEFAULT_
     return sorted({row[symbol_col] for row in (resp.data or []) if row.get(symbol_col) is not None})
 
 
+def insert_rows_to_supabase(df: pd.DataFrame, symbol: str, timeframe: str, source: str,
+                             table: str = DEFAULT_TABLE, symbol_col: str = DEFAULT_SYMBOL_COL,
+                             timestamp_col: str = DEFAULT_TIMESTAMP_COL,
+                             timeframe_col: str = DEFAULT_TIMEFRAME_COL,
+                             source_col: str = DEFAULT_SOURCE_COL,
+                             col_map: Optional[dict] = None, batch_size: int = 1000) -> int:
+    """Writes a standard-shape DataFrame (timestamp index, lowercase
+    open/high/low/close/volume columns) into a Supabase table as a new,
+    clearly-tagged data source alongside whatever else already lives there
+    -- e.g. mirroring free HistData.com bars into the same public.prices
+    table used for a broker's live feed, tagged with a different Source
+    value so the two can be queried and compared side by side.
+
+    Plain inserts, no upsert/on_conflict: safe to call once per
+    symbol/timeframe/source, but re-running it for the same range will
+    create duplicate rows. Raises on the first batch that fails (e.g. an
+    RLS policy rejecting the insert) rather than silently dropping rows.
+    """
+    client = _supabase_client()
+    inverse_col_map = {v: k for k, v in {**DEFAULT_PRICE_COL_MAP, **(col_map or {})}.items()}
+
+    records = df.rename(columns=inverse_col_map).reset_index(names=timestamp_col)
+    for c in inverse_col_map.values():
+        records[c] = records[c].astype(float)  # avoid numpy int64, which isn't JSON-serializable
+    records[timestamp_col] = records[timestamp_col].apply(lambda ts: ts.isoformat())
+    records[symbol_col] = symbol
+    records[timeframe_col] = timeframe
+    records[source_col] = source
+    rows = records.to_dict(orient='records')
+
+    total = 0
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start + batch_size]
+        client.table(table).insert(batch).execute()
+        total += len(batch)
+    return total
+
+
 # --- Local CSV cache ------------------------------------------------------
 # A local mirror of Supabase rows, written by strategy/fetch_supabase_csv.py
 # and read back here. Lets run_discovery.py run against a snapshot of the
