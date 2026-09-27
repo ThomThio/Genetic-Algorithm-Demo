@@ -17,13 +17,20 @@ export interface Plan {
   ttl_bars: number;
   reprice_every: number;
   rr: number | null;
+  risk_pct?: number;
+  risk_usd_actual?: number; // what a stop-out really costs, spread included
+  lot_capped?: boolean;
+  spread_r?: number | null;
+  warnings?: string[];
 }
 
 export interface Tick {
   bid: number;
   ask: number;
+  last?: number | null;
   ts: string;
   plan?: Plan;
+  plans?: Record<"LONG" | "SHORT", Plan>;
 }
 
 export interface Analog {
@@ -38,6 +45,18 @@ export interface Analog {
   fwd_move_atr: number | null;
   end_idx: number; // index in `path` of the window end (aligned to the current last bar)
   path: number[];
+  times?: number[]; // unix seconds of each path point (absent on analyses saved by an older runner)
+}
+
+export interface MarketEvent {
+  date: string; // YYYY-MM-DD (UTC)
+  time?: string; // HH:MM UTC, default 12:00
+  title: string;
+  short: string;
+  category: string;
+  source: string;
+  note?: string;
+  instruments?: string[]; // omit = relevant to every instrument
 }
 
 export interface Gate {
@@ -71,6 +90,7 @@ export interface RunnerInfo {
   mode?: string;
   allow_live?: boolean;
   armed?: boolean;
+  risk_pct?: number;
   error?: string;
   started_at?: string;
   order?: { ticket: number; state: string; limit: number; sl: number; tp: number; lots: number };
@@ -106,6 +126,12 @@ export interface TradeRow {
   lots: number | null;
   r_multiple: number | null;
   exit_reason: string | null;
+  pnl_usd: number | null; // realized, set when closed
+  open_pnl_usd: number | null; // floating while filled
+  open_r: number | null;
+  mark_price: number | null;
+  last_price: number | null;
+  open_costs_usd: number | null;
 }
 
 export interface DecisionRow {
@@ -114,4 +140,13 @@ export interface DecisionRow {
   action: string;
   reason: string;
   regime: string | null;
+}
+
+export interface TradeCommand {
+  id: number;
+  instrument: string;
+  action: "ENTER_LONG" | "ENTER_SHORT";
+  status: "pending" | "placed" | "simulated" | "rejected" | "expired";
+  created_at: string;
+  result: { reason?: string; ticket?: number; mode?: string; plan?: Plan } | null;
 }

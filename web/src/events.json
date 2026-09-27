@@ -1,0 +1,25 @@
+[
+  { "date": "2025-01-29", "time": "19:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-03-19", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-05-07", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-06-18", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-07-30", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-09-17", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-10-29", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2025-12-10", "time": "19:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-01-28", "time": "19:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-03-18", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-04-29", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-06-17", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-07-29", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-09-16", "time": "18:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-10-28", "time": "18:00", "title": "FOMC rate decision", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+  { "date": "2026-12-09", "time": "19:00", "title": "FOMC rate decision (with projections)", "short": "FOMC", "category": "central_bank", "source": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+
+  { "date": "2026-02-28", "time": "06:15", "title": "US and Israel begin striking Iran (2026 Iran war)", "short": "Iran war", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war", "note": "Strikes began 28 Feb around 09:45 IRST; the operation was authorized the day before" },
+  { "date": "2026-04-08", "title": "Iran war: two-week ceasefire begins", "short": "Ceasefire", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war" },
+  { "date": "2026-04-13", "title": "Iran war: Islamabad talks fail (12-13 Apr)", "short": "Talks fail", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war" },
+  { "date": "2026-06-17", "title": "Iran war: US and Iran sign the Islamabad Memorandum", "short": "Memorandum", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war" },
+  { "date": "2026-06-28", "title": "Iran war: US and Iran agree to cease attacks", "short": "Cease attacks", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war" },
+  { "date": "2026-07-08", "title": "Iran war: ceasefire collapses after Strait of Hormuz attacks", "short": "Ceasefire ends", "category": "geopolitical", "source": "https://en.wikipedia.org/wiki/2026_Iran_war" }
+]

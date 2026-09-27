@@ -33,19 +33,33 @@ MAGIC = int(os.environ.get("FXR_MAGIC", "20260926"))
 TAG = "fxr"
 
 
-def size_lots(balance, risk_pct, entry, stop, sym):
-    """Lots so that a stop-out loses ~risk_pct of balance. Rounds DOWN to the lot step; returns 0.0
-    if even the minimum lot would risk more than allowed (never rounds up past the risk budget)."""
-    stop_dist = abs(entry - stop)
+def size_lots_info(balance, risk_pct, entry, stop, sym, spread=0.0):
+    """Lots so that being stopped out loses ~risk_pct of balance, and what that really risks.
+
+    A stop fills on the far side of the spread (a short's stop trades at the ask, a long's at the bid), so a
+    stopped-out trade loses the stop distance PLUS the spread: that is what the risk is sized on. Lots round
+    DOWN to the lot step; 0 if even the minimum lot would risk more than allowed (never rounds up past the
+    budget). `capped` = the broker's max lot cut the size, so the real risk is below the target."""
+    risk_dist = abs(entry - stop) + spread
     tick_size, tick_value = float(sym["tickSize"]), float(sym["tickValue"])
-    if stop_dist <= 0 or tick_size <= 0 or tick_value <= 0:
-        return 0.0
-    loss_per_lot = stop_dist / tick_size * tick_value
-    lots = balance * risk_pct / loss_per_lot
+    info = {"lots": 0.0, "risk_usd": 0.0, "capped": False, "below_min": False}
+    if risk_dist <= 0 or tick_size <= 0 or tick_value <= 0:
+        return info
+    loss_per_lot = risk_dist / tick_size * tick_value
     step, lo, hi = float(sym["lotStep"]), float(sym["minLotSize"]), float(sym["maxLotSize"])
-    lots = math.floor(lots / step + 1e-9) * step
+    lots = math.floor(balance * risk_pct / loss_per_lot / step + 1e-9) * step
+    info["capped"] = lots > hi
     lots = min(lots, hi)
-    return round(lots, 8) if lots >= lo else 0.0
+    if lots < lo:
+        info["below_min"] = True
+        return info
+    info["lots"] = round(lots, 8)
+    info["risk_usd"] = round(lots * loss_per_lot, 2)
+    return info
+
+
+def size_lots(balance, risk_pct, entry, stop, sym, spread=0.0):
+    return size_lots_info(balance, risk_pct, entry, stop, sym, spread)["lots"]
 
 
 def get_symbol_info(api, symbol):
@@ -66,6 +80,11 @@ def fighter_prices(direction, anchor, atr, ask, sym, hint):
     else:
         limit = min(anchor - hint["k_atr"] * atr, ask - floor)
         sl, tp = limit - hint["sl_atr"] * atr, limit + hint["tp_atr"] * atr
+    if floor:   # the broker rejects a stop or target closer than its stop level to the order price
+        if direction == "SHORT":
+            sl, tp = max(sl, limit + floor), min(tp, limit - floor)
+        else:
+            sl, tp = min(sl, limit - floor), max(tp, limit + floor)
     return round(limit, digits), round(sl, digits), round(tp, digits)
 
 
@@ -105,11 +124,12 @@ class FighterOrder:
     def _prices(self):
         tick = self.api.Get_last_tick_info(self.symbol)
         anchor = tick["bid"] if self.direction == "SHORT" else tick["ask"]
-        return fighter_prices(self.direction, anchor, self.params["atr"], tick["ask"], self.sym, self.params)
+        limit, sl, tp = fighter_prices(self.direction, anchor, self.params["atr"], tick["ask"], self.sym, self.params)
+        return limit, sl, tp, tick["ask"] - tick["bid"]
 
     def place(self):
-        self.limit, self.sl, self.tp = self._prices()
-        self.lots = size_lots(self.balance, self.risk_pct, self.limit, self.sl, self.sym)
+        self.limit, self.sl, self.tp, spread = self._prices()
+        self.lots = size_lots(self.balance, self.risk_pct, self.limit, self.sl, self.sym, spread)
         if self.lots <= 0:
             print("Risk budget is smaller than the minimum lot, skipping.")
             return None
@@ -136,7 +156,7 @@ class FighterOrder:
             return "cancelled"
         every = self.params["reprice_every"]
         if every and (time.time() - self.last_reprice) >= every * BAR_SECONDS:
-            self.limit, self.sl, self.tp = self._prices()
+            self.limit, self.sl, self.tp, _ = self._prices()
             self.api.Change_settings_for_pending_order(ticket=self.ticket, price=self.limit,
                                                        stoploss=self.sl, takeprofit=self.tp)
             self.last_reprice = time.time()
@@ -204,7 +224,7 @@ def main(argv=None):
         direction = args.direction.upper()
         anchor = tick["bid"] if direction == "SHORT" else tick["ask"]
         limit, sl, tp = fighter_prices(direction, anchor, hint["atr"], tick["ask"], sym, params)
-        lots = size_lots(args.balance, args.risk, limit, sl, sym)
+        lots = size_lots(args.balance, args.risk, limit, sl, sym, tick["ask"] - tick["bid"])
         risk_usd = args.balance * args.risk
         print(f"Setup: {direction} limit {limit}  SL {sl}  TP {tp}  lots {lots}  "
               f"(risking ${risk_usd:,.0f} = {args.risk:.0%} of ${args.balance:,.0f}; "

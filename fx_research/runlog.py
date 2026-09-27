@@ -74,14 +74,29 @@ def refresh_metrics(client, schema, run_id, summary=None, edges=None):
             .eq("status", "closed").order("placed_at").execute().data)
     edge = compute_edge([r["r_multiple"] for r in rows], [r["placed_at"] for r in rows])
     as_of = next((r["placed_at"] for r in reversed(rows) if r["placed_at"]), _now())
+    pnl = _pnl(client, schema, run_id)
     db = client.schema(schema)
     db.table("run_metrics").upsert(
         _clean({"run_id": run_id, "as_of": str(as_of), "final": True, "fills": edge["n_trades"],
                 "closed": edge["n_trades"], "mean_r": edge["expectancy_R"], "total_r": edge["net_profit_R"],
                 "win_rate": edge["win_rate"], "max_dd_r": edge["max_drawdown_R"],
-                "extra": {"edge": edge, **(edges or {})}}), on_conflict="run_id,as_of").execute()
+                "extra": {"edge": edge, "pnl": pnl, **(edges or {})}}), on_conflict="run_id,as_of").execute()
     if summary is None:
         summary = client.schema(schema).table("strategy_runs").select("summary").eq("id", run_id).execute().data[0]["summary"] or {}
     client.schema(schema).table("strategy_runs").update(
-        _clean({"summary": {**summary, "edge": edge, **(edges or {})}})).eq("id", run_id).execute()
+        _clean({"summary": {**summary, "edge": edge, "pnl": pnl, **(edges or {})}})).eq("id", run_id).execute()
     return edge
+
+
+def _pnl(client, schema, run_id):
+    """Realized (closed trades' pnl_usd) and open (floating, filled trades) USD P&L of a run.
+    Returns None if the pnl columns are not there yet (sql/fx_trade_pnl.sql not applied)."""
+    try:
+        rows = (client.schema(schema).table("trades").select("status,pnl_usd,open_pnl_usd")
+                .eq("run_id", run_id).eq("simulated", False).execute().data)
+    except Exception:
+        return None
+    realized = sum(r["pnl_usd"] or 0 for r in rows if r["status"] == "closed")
+    open_ = sum(r["open_pnl_usd"] or 0 for r in rows if r["status"] == "filled")
+    return {"realized_usd": realized, "open_usd": open_, "total_usd": realized + open_,
+            "open_trades": sum(1 for r in rows if r["status"] == "filled")}

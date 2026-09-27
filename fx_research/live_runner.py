@@ -20,18 +20,19 @@ from . import data
 from .backfill import upsert_bars
 from .backtest import spread_for
 from .config import Settings
-from .decision import decide
+from .decision import Decision, decide
 from .execute import (ACCOUNT_BALANCE, MAX_BAR_AGE_HOURS, RISK_PCT, FighterOrder, fighter_prices, get_symbol_info,
-                      has_our_exposure, size_lots)
+                      has_our_exposure, size_lots_info)
 from .features import atr
 from .runlog import RunLogger
 from .scan import BarLoader, analyse_instrument
 from .scheduler import market_open
 from .store import make_supabase_client
-from .track_live import sync
+from .track_live import mark_open_trades, sync
 from .walkforward import day_close_positions
 
 SOURCE = "FTMO_MT4_demo"
+COMMAND_TTL_S = 60   # a UI command older than this when the runner sees it is dropped, never executed late
 N_ANALOGS = 5
 VERSION = "live_runner/1"
 
@@ -58,18 +59,31 @@ def analog_paths(bars, analogs, s, atr_now, last_close):
                     "regime": a["regime"], "same_regime": a["same_regime"], "split": a["split"],
                     "window_start": a["window_start"], "window_end": a["window_end"],
                     "fwd_move_atr": a["fwd_move_atr"], "end_idx": int(end - start),
+                    "times": [int(t.timestamp()) for t in bars.index[start:stop + 1]],
                     "path": [round(float(x), 6) for x in scaled]})
     return out
 
 
 def plan_from_tick(direction, tick, params, sym, balance, risk):
-    """Where the fighter entry would go right now (recomputed on every tick)."""
+    """Where the fighter entry would go right now (recomputed on every tick), sized so a stop-out risks `risk`
+    of the balance INCLUDING the spread. Stop and target are the GA's ATR multiples (params sl_atr / tp_atr)."""
     anchor = tick["bid"] if direction == "SHORT" else tick["ask"]
     limit, sl, tp = fighter_prices(direction, anchor, params["atr"], tick["ask"], sym, params)
-    return {"direction": direction, "limit": limit, "sl": sl, "tp": tp,
-            "lots": size_lots(balance, risk, limit, sl, sym), "risk_usd": balance * risk, "balance": balance,
+    spread = tick["ask"] - tick["bid"]
+    info = size_lots_info(balance, risk, limit, sl, sym, spread)
+    sl_dist, tp_dist = abs(sl - limit), abs(tp - limit)
+    warnings = []
+    if info["capped"]:
+        warnings.append("lots capped at the broker max, so real risk is below the target")
+    if info["below_min"]:
+        warnings.append("risk budget is below the minimum lot")
+    if sl_dist and spread / sl_dist > 0.3:
+        warnings.append(f"spread is {spread / sl_dist:.0%} of the stop distance")
+    return {"direction": direction, "limit": limit, "sl": sl, "tp": tp, "lots": info["lots"],
+            "risk_pct": risk, "risk_usd": balance * risk, "risk_usd_actual": info["risk_usd"], "balance": balance,
+            "lot_capped": info["capped"], "spread_r": round(spread / sl_dist, 3) if sl_dist else None,
             "ttl_bars": params["ttl_bars"], "reprice_every": params["reprice_every"],
-            "rr": round(abs(limit - tp) / abs(sl - limit), 2) if sl != limit else None}
+            "rr": round(tp_dist / sl_dist, 2) if sl_dist else None, "warnings": warnings}
 
 
 class Instrument:
@@ -121,7 +135,7 @@ def main(argv=None):
                     fx("live_state").upsert({"instrument": ins.name, "updated_at": _now().isoformat(),
                                              "runner": {"mode": mode, "error": repr(e), "started_at": started}},
                                             on_conflict="instrument").execute()
-            if time.time() - last_sync > 60:
+            if time.time() - last_sync > 15:
                 last_sync = time.time()
                 sync(api, client, s.results_schema)
             time.sleep(args.tick_seconds)
@@ -135,10 +149,53 @@ def main(argv=None):
     return 0
 
 
+def handle_commands(fx, api, ins, tick, armed, args, mode, now):
+    """Manual entries requested from the UI (trade_commands). Real orders need --allow-live AND the trading
+    switch armed (same gates as automatic entries); otherwise the entry is only SIMULATED: the exact order it
+    would send is built and reported back, nothing goes to MT4. Stale commands are dropped, never run late."""
+    try:
+        cmds = fx("trade_commands").select("*").eq("instrument", ins.name).eq("status", "pending").order("created_at").execute().data
+    except Exception:   # table not created yet (sql/fx_trade_commands.sql): manual entries just are not available
+        return
+    for c in cmds:
+        direction = "LONG" if c["action"] == "ENTER_LONG" else "SHORT"
+        plan = tick["plans"][direction]
+        age = (pd.Timestamp(now) - pd.Timestamp(c["created_at"])).total_seconds()
+        live = args.allow_live and armed
+        result = {"plan": plan, "mode": "live" if live else "simulated"}
+        if age > COMMAND_TTL_S:
+            status, result = "expired", {"reason": f"command was {age:.0f}s old when the runner saw it"}
+        elif ins.order is not None or (args.allow_live and has_our_exposure(api, ins.name)):
+            status, result["reason"] = "rejected", "there is already a working order or open position on this instrument"
+        elif plan["lots"] <= 0:
+            status, result["reason"] = "rejected", "risk budget is below the minimum lot"
+        elif live and not market_open():
+            status, result["reason"] = "rejected", "market is closed"
+        elif live:
+            order = FighterOrder(api, ins.name, direction, ins.params, ins.sym, args.balance, plan["risk_pct"])
+            ticket = order.place()
+            if ticket:
+                ins.order, status, result["ticket"] = order, "placed", ticket
+                d = Decision("ENTER", "manual entry (UI button)", {"manual": {"pass": True}}, {"params": ins.params})
+                did = ins.log.decision(pd.Timestamp(now), ins.name, d, None, {"plan": plan})
+                ins.log.trade(decision_id=did, instrument=ins.name, direction=direction, simulated=False, ticket=ticket,
+                              status="pending", placed_at=now.isoformat(), limit_price=order.limit, sl=order.sl,
+                              tp=order.tp, lots=order.lots, risk_usd=plan["risk_usd_actual"])
+            else:
+                status, result["reason"] = "rejected", "MT4 rejected the order"
+        else:
+            status = "simulated"
+            result["reason"] = "runner is in paper mode (no --allow-live)" if not args.allow_live else "trading switch is not armed"
+            d = Decision("ENTER", "manual entry (UI button, simulated)", {"manual": {"pass": True}}, {"params": ins.params})
+            ins.log.decision(pd.Timestamp(now), ins.name, d, None, {"plan": plan})
+        fx("trade_commands").update({"status": status, "result": result, "handled_at": now.isoformat()}).eq("id", c["id"]).execute()
+        print(f"{ins.name}: manual {c['action']} -> {status}")
+
+
 def step_instrument(s, client, fx, loader, mt4, api, ins, args, mode, started):
     now = _now()
     tick_raw = api.Get_last_tick_info(ins.name)
-    tick = {"bid": tick_raw["bid"], "ask": tick_raw["ask"], "ts": now.isoformat()}
+    tick = {"bid": tick_raw["bid"], "ask": tick_raw["ask"], "last": tick_raw.get("last deal price"), "ts": now.isoformat()}
 
     # 1. new closed H1 bar -> refresh saved prices and re-run the analysis
     fresh = mt4.load(ins.name, "H1", 6)
@@ -148,19 +205,26 @@ def step_instrument(s, client, fx, loader, mt4, api, ins, args, mode, started):
         tail = data.drop_weekends(mt4.load(ins.name, "H1", 300))
         tail = tail[tail.index + pd.Timedelta(hours=1) <= pd.Timestamp(now)]
         upsert_bars(client, s.prices_schema, s.prices_table, ins.name, "H1", SOURCE, tail)
+        ins.sym = get_symbol_info(api, ins.name)   # tick value moves with the account-currency conversion rate
         analyse(s, client, fx, loader, api, ins, args, now)
 
-    # 2. plan for the current tick + orders
-    state = {"instrument": ins.name, "updated_at": now.isoformat(),
-             "runner": {"mode": mode, "allow_live": args.allow_live, "version": VERSION, "started_at": started}}
-    if ins.params:
-        tick["plan"] = plan_from_tick(ins.direction, tick, ins.params, ins.sym, args.balance, args.risk)
-    state["tick"] = tick
+    mark_open_trades(client, s.results_schema, ins.name, tick, ins.sym)   # floating P&L from this polled tick
+
+    # 2. control row (arming + the fixed risk %), then the plan for both directions
     ctl = fx("trading_control").select("*").eq("instrument", ins.name).execute().data
+    risk = float(ctl[0]["risk_pct"]) if ctl else args.risk
     armed = bool(ctl and ctl[0]["enabled"] and ctl[0]["armed_until"] and
                  pd.Timestamp(ctl[0]["armed_until"]) > pd.Timestamp(now))
-    state["runner"]["armed"] = armed
+    state = {"instrument": ins.name, "updated_at": now.isoformat(),
+             "runner": {"mode": mode, "allow_live": args.allow_live, "version": VERSION, "started_at": started,
+                        "armed": armed, "risk_pct": risk}}
+    if ins.params:
+        plans = {d: plan_from_tick(d, tick, ins.params, ins.sym, args.balance, risk) for d in ("LONG", "SHORT")}
+        tick["plans"], tick["plan"] = plans, plans[ins.direction]
+        handle_commands(fx, api, ins, tick, armed, args, mode, now)
+    state["tick"] = tick
 
+    # 3. working order, or an automatic entry
     if ins.order is not None:
         result = ins.order.step()
         state["runner"]["order"] = {"ticket": ins.order.ticket, "state": result, "limit": ins.order.limit,
@@ -171,14 +235,14 @@ def step_instrument(s, client, fx, loader, mt4, api, ins, args, mode, started):
             and market_open() and not has_our_exposure(api, ins.name):
         plan = tick["plan"]
         if plan["lots"] > 0:
-            order = FighterOrder(api, ins.name, ins.direction, ins.params, ins.sym, args.balance, args.risk)
+            order = FighterOrder(api, ins.name, ins.direction, ins.params, ins.sym, args.balance, risk)
             ticket = order.place()
             if ticket:
                 ins.order = order
                 ins.log.trade(decision_id=ins.decision_id, instrument=ins.name, direction=ins.direction,
                               simulated=False, ticket=ticket, status="pending", placed_at=now.isoformat(),
                               limit_price=order.limit, sl=order.sl, tp=order.tp, lots=order.lots,
-                              risk_usd=plan["risk_usd"])
+                              risk_usd=plan["risk_usd_actual"])
                 ins.analysis["decision"] = {**ins.analysis["decision"], "reason": f"order #{ticket} placed"}
     if ins.analysis:
         state["analysis"] = ins.analysis

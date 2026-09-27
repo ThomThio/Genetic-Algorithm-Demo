@@ -19,7 +19,9 @@ select r.id as run_id, r.started_at, r.mode, r.instrument, r.direction,
        (r.summary->'out_of_sample'->>'expectancy_R')::float as oos_expectancy_r,
        (r.summary->'robustness'->'vs_random_distribution'->>'percentile_rank_vs_random')::float as pct_vs_random,
        (r.summary->'robustness'->'noise_test'->>'spread_ratio')::float as noise_spread,
-       (r.summary->'robustness'->'permutation_test'->>'percentile_rank_vs_shuffled')::float as pct_vs_shuffled
+       (r.summary->'robustness'->'permutation_test'->>'percentile_rank_vs_shuffled')::float as pct_vs_shuffled,
+       (r.summary->'pnl'->>'realized_usd')::float         as realized_pnl_usd,   -- needs sql/fx_trade_pnl.sql
+       (r.summary->'pnl'->>'open_usd')::float             as open_pnl_usd
 from fx_research.strategy_runs r
 where r.status = 'finished';
 grant select on fx_research.run_compare to anon;

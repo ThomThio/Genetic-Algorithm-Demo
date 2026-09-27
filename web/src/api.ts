@@ -1,4 +1,4 @@
-import type { Bar, Control, DecisionRow, LiveState, TradeRow } from "./types";
+import type { Bar, Control, DecisionRow, LiveState, TradeCommand, TradeRow } from "./types";
 
 const URL = import.meta.env.VITE_SUPABASE_URL as string;
 const KEY = import.meta.env.VITE_SUPABASE_KEY as string;
@@ -72,8 +72,8 @@ export function getTrades(instrument: string): Promise<TradeRow[]> {
   return rest<TradeRow[]>(
     RESULTS,
     "trades",
-    "select=id,direction,status,simulated,ticket,placed_at,limit_price,entry,exit,sl,tp,lots,r_multiple,exit_reason" +
-      `&instrument=eq.${enc(instrument)}&simulated=eq.false&order=placed_at.desc&limit=8`,
+    "select=id,direction,status,simulated,ticket,placed_at,limit_price,entry,exit,sl,tp,lots,r_multiple,exit_reason,pnl_usd,open_pnl_usd,open_r,mark_price,last_price,open_costs_usd" +
+      `&instrument=eq.${enc(instrument)}&simulated=eq.false&order=placed_at.desc&limit=200`,
   );
 }
 
@@ -82,5 +82,21 @@ export function getDecisions(instrument: string): Promise<DecisionRow[]> {
     RESULTS,
     "decision_log",
     `select=id,decided_at,action,reason,regime&instrument=eq.${enc(instrument)}&order=decided_at.desc&limit=8`,
+  );
+}
+
+export async function createCommand(instrument: string, action: TradeCommand["action"]): Promise<void> {
+  await rest(RESULTS, "trade_commands", "", {
+    method: "POST",
+    write: true,
+    body: JSON.stringify({ instrument, action, requested_by: "web" }),
+  });
+}
+
+export function getCommands(instrument: string): Promise<TradeCommand[]> {
+  return rest<TradeCommand[]>(
+    RESULTS,
+    "trade_commands",
+    `select=id,instrument,action,status,created_at,result&instrument=eq.${enc(instrument)}&order=created_at.desc&limit=5`,
   );
 }

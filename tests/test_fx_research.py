@@ -258,7 +258,7 @@ def test_tracker_pending_stays_and_gone_is_cancelled():
 
 def test_tracker_filled_then_closed_at_target_gives_positive_r():
     empty = pd.DataFrame(columns=["ticket"])
-    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"]})
+    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"], "profit": [0.0]})
     upd = resolve_trade(_live(), empty, opened, empty)
     assert upd["status"] == "filled" and upd["entry"] == 1.2790
     closed = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "closeprice": [1.2750], "profit": [4000.0],
@@ -268,3 +268,62 @@ def test_tracker_filled_then_closed_at_target_gives_positive_r():
     assert upd["status"] == "closed" and upd["exit_reason"] == "tp"
     assert upd["r_multiple"] == pytest.approx(0.004 / 0.002)   # 40 pips won on a 20 pip stop
     assert upd["pnl_usd"] == 3985.0
+
+
+def test_tracker_open_position_only_reports_state_and_costs():
+    empty = pd.DataFrame(columns=["ticket"])
+    opened = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "opentime": ["2026.09.28 10:00"],
+                           "profit": [1500.0], "swap": [-20.0], "commission": [-10.0]})
+    upd = resolve_trade(_live(status="filled"), empty, opened, empty)
+    assert upd == {"open_costs_usd": -30.0}          # no P&L from MT4's profit field
+    closed = pd.DataFrame({"ticket": [7], "openprice": [1.2790], "closeprice": [1.2750], "profit": [4000.0],
+                           "opentime": ["2026.09.28 10:00"], "closetime": ["2026.09.28 13:00"]})
+    upd = resolve_trade(_live(status="filled"), empty, empty, closed)
+    assert upd["open_pnl_usd"] is None and upd["pnl_usd"] == 4000.0
+
+
+from fx_research.track_live import floating_pnl
+
+SGD_SYM = {"tickSize": 0.00001, "tickValue": 0.78}
+
+
+def test_floating_pnl_marks_short_at_ask_and_long_at_bid():
+    tick = {"bid": 1.27900, "ask": 1.27950, "last": 1.27920}
+    short = {"direction": "SHORT", "entry": 1.28000, "lots": 2.0, "sl": 1.28200}
+    p = floating_pnl(short, tick, SGD_SYM)               # short closes at the ask: +0.0005 x 2 lots
+    assert p["mark_price"] == 1.27950 and p["last_price"] == 1.27920
+    assert p["open_pnl_usd"] == pytest.approx(0.0005 / 0.00001 * 0.78 * 2)   # 50 ticks x 0.78 x 2 lots = 78
+    assert p["open_r"] == pytest.approx(0.0005 / 0.0020)
+    long_ = {"direction": "LONG", "entry": 1.28000, "lots": 1.0, "sl": 1.27800}
+    p = floating_pnl(long_, tick, SGD_SYM)               # long closes at the bid: -0.0010
+    assert p["mark_price"] == 1.27900 and p["open_pnl_usd"] == pytest.approx(-100 * 0.78)
+    assert p["open_r"] == pytest.approx(-0.5)
+
+
+# --- risk sizing includes the spread; broker minimum stop distance ------------------------
+
+from fx_research.execute import size_lots_info
+
+
+def test_size_lots_includes_spread_in_risk():
+    # stop 0.0023 away + 0.0009 spread = 0.0032 -> 320 ticks x 0.78 = 249.6 per lot -> 12.01 lots (3% of 100k)
+    info = size_lots_info(100_000, 0.03, 1.2800, 1.2823, SGD, spread=0.0009)
+    assert info["lots"] == pytest.approx(12.01) and not info["capped"]
+    assert info["risk_usd"] == pytest.approx(12.01 * 249.6, abs=0.01) and info["risk_usd"] <= 3000
+    assert size_lots(100_000, 0.03, 1.2800, 1.2823, SGD) > info["lots"]   # ignoring the spread oversizes
+
+
+def test_size_lots_info_reports_cap_and_min_lot():
+    big = size_lots_info(1e9, 0.03, 1.2800, 1.2823, SGD, spread=0.0009)
+    assert big["capped"] and big["lots"] == 50.0 and big["risk_usd"] < 1e9 * 0.03
+    tiny = size_lots_info(100, 0.03, 1.0, 1.5, SGD)
+    assert tiny["below_min"] and tiny["lots"] == 0.0
+
+
+def test_fighter_prices_enforce_broker_stop_level():
+    sym = {**SGD, "stopLevel": 100}                      # 100 points = 0.001
+    hint = {"k_atr": 1.0, "sl_atr": 0.1, "tp_atr": 0.2}  # would put SL/TP 0.0001 / 0.0002 away
+    limit, sl, tp = fighter_prices("SHORT", 1.2800, 0.001, 1.2805, sym, hint)
+    assert sl - limit >= 0.001 - 1e-9 and limit - tp >= 0.001 - 1e-9
+    limit, sl, tp = fighter_prices("LONG", 1.2800, 0.001, 1.2805, sym, hint)
+    assert limit - sl >= 0.001 - 1e-9 and tp - limit >= 0.001 - 1e-9

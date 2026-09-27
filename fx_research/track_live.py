@@ -43,7 +43,9 @@ def _utc(raw):
 
 
 def resolve_trade(trade, pending_df, open_df, closed_df):
-    """Pure function: the update to apply to one live trade row given MT4's current state, or None."""
+    """Pure function: the update to apply to one live trade row given MT4's current state, or None.
+    Floating P&L is NOT computed here (see floating_pnl, from polled ticks); an open position only gets
+    its state and MT4's accrued swap/commission."""
     ticket = trade["ticket"]
     sign = 1 if trade["direction"] == "LONG" else -1
     if _find(pending_df, ticket) is not None:
@@ -59,17 +61,45 @@ def resolve_trade(trade, pending_df, open_df, closed_df):
                   "sl" if trade.get("sl") and abs(cl - float(trade["sl"])) <= tol else "manual")
         extras = sum(float(pos[c]) for c in ("swap", "commission") if c in closed_df.columns)
         return {"status": "closed", "entry": op, "exit": cl, "r_multiple": r, "exit_reason": reason,
+                "open_pnl_usd": None, "open_r": None, "mark_price": None, "last_price": None,
                 "pnl_usd": float(pos["profit"]) + extras,
                 "filled_at": _utc(pos[_col(closed_df, "open_time", "opentime")]),
                 "closed_at": _utc(pos[_col(closed_df, "close_time", "closetime")])}
     pos = _find(open_df, ticket)
     if pos is not None:
-        if trade["status"] == "filled":
-            return None
-        return {"status": "filled", "entry": float(pos[_col(open_df, "open_price", "openprice")]),
-                "filled_at": _utc(pos[_col(open_df, "open_time", "opentime")])}
+        op = float(pos[_col(open_df, "open_price", "openprice")])
+        upd = {"open_costs_usd": sum(float(pos[c]) for c in ("swap", "commission") if c in open_df.columns)}
+        if trade["status"] != "filled":
+            upd.update(status="filled", entry=op, filled_at=_utc(pos[_col(open_df, "open_time", "opentime")]))
+        return upd
     # not pending, open or closed: an unfilled order that was cancelled/expired
     return {"status": "cancelled"} if trade["status"] == "pending" else None
+
+
+def floating_pnl(trade, tick, sym):
+    """Open P&L of a filled trade from a polled tick: (mark - entry) x direction x lots x (tickValue / tickSize),
+    marking a long at the bid and a short at the ask (the price you could close at). tickValue is in the account
+    currency, so this is USD. `tick` = {bid, ask, last}. Excludes swap/commission (those are open_costs_usd)."""
+    sign = 1 if trade["direction"] == "LONG" else -1
+    entry, lots = float(trade["entry"]), float(trade["lots"])
+    mark = tick["bid"] if sign > 0 else tick["ask"]
+    per_lot_per_unit = float(sym["tickValue"]) / float(sym["tickSize"])
+    move = (mark - entry) * sign
+    risk = abs(entry - float(trade["sl"])) if trade.get("sl") else None
+    return {"open_pnl_usd": move * per_lot_per_unit * lots, "open_r": move / risk if risk else None,
+            "mark_price": mark, "last_price": tick.get("last"),
+            "pnl_updated_at": pd.Timestamp.now(tz="UTC").isoformat()}
+
+
+def mark_open_trades(client, schema, instrument, tick, sym):
+    """Update every filled live trade on `instrument` with its floating P&L from this tick."""
+    db = lambda: client.schema(schema)
+    rows = (db().table("trades").select("id,direction,entry,lots,sl").eq("simulated", False)
+            .eq("status", "filled").eq("instrument", instrument).execute().data)
+    for t in rows:
+        if t["entry"] is not None and t["lots"]:
+            db().table("trades").update(floating_pnl(t, tick, sym)).eq("id", t["id"]).execute()
+    return len(rows)
 
 
 def sync(api, client, schema, enforce_max_hold=False):
@@ -97,8 +127,9 @@ def sync(api, client, schema, enforce_max_hold=False):
         if upd:
             db().table("trades").update(upd).eq("id", t["id"]).execute()
             touched.add(t["run_id"])
-            changed += 1
-            print(f"#{t['ticket']} -> {upd['status']}" + (f" R={upd['r_multiple']:+.2f}" if upd.get("r_multiple") is not None else ""))
+            changed += 1 if "status" in upd else 0
+            if "status" in upd:   # only log real state changes, not every open-P&L refresh
+                print(f"#{t['ticket']} -> {upd['status']}" + (f" R={upd['r_multiple']:+.2f}" if upd.get("r_multiple") is not None else ""))
     for run_id in touched:
         edge = refresh_metrics(client, schema, run_id)
         print(f"run {run_id[:8]}: n={edge['n_trades']} exp={edge['expectancy_R']:+.2f}R PF={edge['profit_factor']:.2f}")
