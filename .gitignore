@@ -2,3 +2,5 @@ __pycache__/
 .pytest_cache/
 fx_research_output/
 .env
+.venv/
+*.pyc

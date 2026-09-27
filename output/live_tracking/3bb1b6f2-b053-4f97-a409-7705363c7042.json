@@ -1,0 +1,28 @@
+{
+  "strategy_id": "3bb1b6f2-b053-4f97-a409-7705363c7042",
+  "symbol": "DEMO_TREND_PULLBACK",
+  "rule_text": "MACD line above signal AND MACD histogram crosses above zero",
+  "risk_model": {
+    "stop_atr_mult": 2.37,
+    "target_R": 3.31,
+    "max_hold_bars": 5,
+    "entry_fill": "next_bar_open"
+  },
+  "backtest_baseline": {
+    "n_trades": 18,
+    "win_rate": 0.4444,
+    "win_rate_lb95": 0.2456,
+    "avg_win_R": 0.4767,
+    "avg_loss_R": 0.7328,
+    "reward_risk": 0.6505,
+    "profit_factor": 0.5204,
+    "expectancy_R": -0.1952,
+    "edge_score": -0.4357,
+    "net_profit_R": -3.5143,
+    "max_drawdown_R": 3.8001,
+    "pnl_to_dd_ratio": -0.9248,
+    "sharpe_ratio": -1.1408,
+    "meets_min_trade_count": false
+  },
+  "live_trades": []
+}

@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""CLI: evolve long-only entry rules per symbol/slice and export the ones
+with validated edge to JSON.
+
+Examples:
+    # demo run against synthetic data (no external dependencies beyond pip
+    # install pandas numpy):
+    python3 -m strategy.run_discovery --source synthetic
+
+    # once Supabase is connected and SUPABASE_URL / SUPABASE_KEY are set
+    # (defaults already match this workspace's public.prices schema):
+    python3 -m strategy.run_discovery --source supabase --symbols USDSGD,EURUSD \
+        --timeframe H1 --source-name FTMO_MT4_demo
+
+    # against a local mirror of the above (see fetch_supabase_csv.py) --
+    # same rules, no network dependency, and works from cached snapshots:
+    python3 -m strategy.fetch_supabase_csv --timeframe H1 --source-name FTMO_MT4_demo
+    python3 -m strategy.run_discovery --source local --timeframe H1 --source-name FTMO_MT4_demo
+
+    # a one-off local CSV file (timestamp,open,high,low,close,volume columns):
+    python3 -m strategy.run_discovery --source csv --csv-path data/SPY.csv --symbols SPY
+
+The default --source can also be set via the STRATEGY_SOURCE environment
+variable (e.g. `export STRATEGY_SOURCE=local`) instead of passing --source
+on every invocation.
+"""
+import argparse
+import os
+import sys
+
+from . import data as data_mod
+from .backtest import run_backtest
+from .fitness import MIN_TRADES_FOR_SIGNAL, OOS_MIN_TRADES, compute_edge
+from .ga_engine import GENERATIONS, POP_SIZE, run_ga
+from .genome import materialize_signal
+from .indicators import compute_indicator_frame
+from .interpretation import interpret
+from .export import build_record, write_records
+from .report import write_reports
+from .robustness import run_all as run_robustness
+from .slicer import train_test_split_chrono
+
+
+def _rule_preview(conditions) -> str:
+    return ' AND '.join(c.name for c in conditions)
+
+
+def _load_symbol(args, symbol: str):
+    if args.source == 'synthetic':
+        return data_mod.generate_synthetic(symbol, n_bars=args.n_bars, seed=args.seed)
+    if args.source == 'csv':
+        return data_mod.load_from_csv(args.csv_path)
+    if args.source == 'supabase':
+        return data_mod.load_from_supabase(
+            table=args.table, symbol=symbol, symbol_col=args.symbol_col,
+            timestamp_col=args.timestamp_col, timeframe=args.timeframe,
+            timeframe_col=args.timeframe_col, source=args.source_name,
+            source_col=args.source_col,
+        )
+    if args.source == 'local':
+        return data_mod.load_from_local_cache(
+            symbol, timeframe=args.timeframe, source=args.source_name, cache_dir=args.cache_dir,
+        )
+    raise ValueError(f'unknown source: {args.source}')
+
+
+def run_for_symbol(args, symbol: str):
+    slice_desc = args.source
+    if args.source in ('supabase', 'local'):
+        slice_desc = f'{args.source}, timeframe={args.timeframe}, source={args.source_name}'
+    print(f'\n=== {symbol} ({slice_desc}) ===', file=sys.stderr)
+    df = _load_symbol(args, symbol)
+    if len(df) < 300:
+        print(f'  skipping {symbol}: only {len(df)} bars, need >=300', file=sys.stderr)
+        return []
+
+    ind_full = compute_indicator_frame(df)
+    train_df, test_df = train_test_split_chrono(df, args.train_frac)
+    ind_train = ind_full.loc[train_df.index]
+    ind_test = ind_full.loc[test_df.index]
+
+    print(f'  train: {len(train_df)} bars [{train_df.index[0]} .. {train_df.index[-1]}]', file=sys.stderr)
+    print(f'  test:  {len(test_df)} bars [{test_df.index[0]} .. {test_df.index[-1]}]', file=sys.stderr)
+
+    def progress(gen, best):
+        if gen % 5 == 0 or gen == args.generations - 1:
+            print(f'  gen {gen:3d}  best_edge_score={best.fitness:+.3f}  '
+                  f'n_trades={best.edge.n_trades}  rule={_rule_preview(best.spec.conditions)[:70]}',
+                  file=sys.stderr)
+
+    qualified = run_ga(train_df, ind_train, pop_size=args.pop_size,
+                        generations=args.generations, seed=args.seed, progress_cb=progress)
+
+    if not qualified:
+        print(f'  no rule cleared the {MIN_TRADES_FOR_SIGNAL}-trade minimum on train data', file=sys.stderr)
+        return []
+
+    pairs = []  # (record, evaluated) so robustness testing can get back to the spec
+    for evaluated in qualified:
+        oos_signal, oos_resolved = materialize_signal(evaluated.spec, test_df, ind_test)
+        oos_trades = run_backtest(test_df, ind_test['atr_14'], oos_signal,
+                                   evaluated.spec.stop_atr_mult, evaluated.spec.target_R,
+                                   evaluated.spec.max_hold_bars)
+        oos_edge = compute_edge(oos_trades)
+
+        text = interpret(evaluated.resolved_conditions, evaluated.spec.stop_atr_mult,
+                          evaluated.spec.target_R, evaluated.spec.max_hold_bars, evaluated.edge)
+        text += (f' Out-of-sample check: {oos_edge.n_trades} trades, '
+                 f'{oos_edge.win_rate:.0%} win rate, expectancy {oos_edge.expectancy_R:+.2f}R -- '
+                 + ('holds up out of sample.' if oos_edge.edge_score > 0 and oos_edge.n_trades >= OOS_MIN_TRADES
+                    else 'does NOT clearly hold out of sample; treat as unvalidated.'))
+
+        record = build_record(
+            symbol=symbol, data_source=args.source,
+            train_range=(train_df.index[0], train_df.index[-1]),
+            test_range=(test_df.index[0], test_df.index[-1]),
+            evaluated=evaluated, oos_edge=oos_edge,
+            resolved_conditions=evaluated.resolved_conditions, interpretation=text,
+            generation_found=evaluated.gen_found,
+            ga_params={'pop_size': args.pop_size, 'generations': args.generations,
+                       'train_frac': args.train_frac},
+        )
+        pairs.append((record, evaluated))
+
+        flag = 'VALIDATED' if record['validated_out_of_sample'] else 'unvalidated'
+        print(f'  [{flag}] edge={record["edge_score"]:+.3f}  '
+              f'IS(n={evaluated.edge.n_trades},wr={evaluated.edge.win_rate:.0%},RR={evaluated.edge.reward_risk:.2f}) '
+              f'OOS(n={oos_edge.n_trades},wr={oos_edge.win_rate:.0%},RR={oos_edge.reward_risk:.2f})  '
+              f'{_rule_preview(evaluated.resolved_conditions)[:60]}', file=sys.stderr)
+
+    # The GA often converges several nearby genomes onto the same condition
+    # set with slightly different thresholds; keep only the best-scoring
+    # variant per distinct condition set so the report shows genuinely
+    # different algorithms rather than near-duplicates.
+    best_per_condition_set = {}
+    for record, evaluated in pairs:
+        key = frozenset(c['key'] for c in record['entry_rule']['conditions'])
+        prev = best_per_condition_set.get(key)
+        if prev is None or record['edge_score'] > prev[0]['edge_score']:
+            best_per_condition_set[key] = (record, evaluated)
+
+    deduped = sorted(best_per_condition_set.values(), key=lambda pair: pair[0]['edge_score'], reverse=True)
+
+    if not args.skip_robustness:
+        for record, evaluated in deduped:
+            if not record['validated_out_of_sample']:
+                continue
+            print(f"  running robustness checks on {record['entry_rule']['rule_text'][:60]} "
+                  f"({args.n_random} random, {args.n_noise} noise, {args.n_shuffles} shuffle)...",
+                  file=sys.stderr)
+            robustness = run_robustness(df, evaluated.spec, n_random=args.n_random,
+                                         n_noise=args.n_noise, n_shuffles=args.n_shuffles, seed=args.seed)
+            record['robustness'] = robustness
+            vr = robustness.get('vs_random_distribution', {})
+            nt = robustness.get('noise_test', {})
+            pt = robustness.get('permutation_test', {})
+            print(f"    vs random: percentile={vr.get('percentile_rank_vs_random', 'n/a')} "
+                  f"beats95={vr.get('beats_random_at_95pct', 'n/a')} | "
+                  f"noise spread={nt.get('spread_ratio', 'n/a')} robust={nt.get('robust_spread_lt_0_5', 'n/a')} | "
+                  f"permutation percentile={pt.get('percentile_rank_vs_shuffled', 'n/a')} "
+                  f"seq_dependent={pt.get('depends_on_real_sequence_at_95pct', 'n/a')}", file=sys.stderr)
+
+    return [record for record, _ in deduped]
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--source', choices=['synthetic', 'csv', 'supabase', 'local'],
+                    default=os.environ.get('STRATEGY_SOURCE', 'synthetic'),
+                    help='where to load price data from; default can also be set via '
+                         'the STRATEGY_SOURCE env var. "local" reads the CSV mirror written '
+                         'by fetch_supabase_csv.py (see --cache-dir).')
+    p.add_argument('--symbols', default=None, help='comma-separated symbol list')
+    p.add_argument('--csv-path', default=None)
+    p.add_argument('--cache-dir', default=data_mod.DEFAULT_LOCAL_DIR, help='local source only')
+    p.add_argument('--table', default=data_mod.DEFAULT_TABLE, help='Supabase table name')
+    p.add_argument('--symbol-col', default=data_mod.DEFAULT_SYMBOL_COL)
+    p.add_argument('--timestamp-col', default=data_mod.DEFAULT_TIMESTAMP_COL)
+    p.add_argument('--timeframe-col', default=data_mod.DEFAULT_TIMEFRAME_COL)
+    p.add_argument('--timeframe', default='H1', help='supabase/local sources only, e.g. H1/H4/D1')
+    p.add_argument('--source-col', default=data_mod.DEFAULT_SOURCE_COL)
+    p.add_argument('--source-name', default=None,
+                    help='supabase/local sources only: filter/match the data-source tag '
+                         '(e.g. FTMO_MT4_demo). Leave unset only if there is just one per symbol+timeframe.')
+    p.add_argument('--n-bars', type=int, default=1500, help='synthetic source only')
+    p.add_argument('--train-frac', type=float, default=0.7)
+    p.add_argument('--pop-size', type=int, default=POP_SIZE)
+    p.add_argument('--generations', type=int, default=GENERATIONS)
+    p.add_argument('--seed', type=int, default=7)
+    p.add_argument('--out-dir', default='output/strategies')
+    p.add_argument('--reports-dir', default='output/reports')
+    p.add_argument('--tracking-dir', default='output/live_tracking')
+    p.add_argument('--skip-robustness', action='store_true',
+                    help='skip the random/noise/permutation robustness checks (faster, less rigorous)')
+    p.add_argument('--n-random', type=int, default=200, help='draws for the vs-random-distribution check')
+    p.add_argument('--n-noise', type=int, default=100, help='variants for the noise test')
+    p.add_argument('--n-shuffles', type=int, default=100, help='shuffles for the permutation test')
+    args = p.parse_args()
+
+    if args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(',') if s.strip()]
+    elif args.source == 'synthetic':
+        symbols = data_mod.SYNTHETIC_SYMBOLS
+    elif args.source == 'supabase':
+        symbols = data_mod.list_supabase_symbols(
+            args.table, args.symbol_col, timeframe=args.timeframe, timeframe_col=args.timeframe_col,
+            source=args.source_name, source_col=args.source_col,
+        )
+        print(f'Discovered symbols in {args.table} (timeframe={args.timeframe}, '
+              f'source={args.source_name}): {symbols}', file=sys.stderr)
+    elif args.source == 'local':
+        symbols = data_mod.list_local_symbols(args.cache_dir, timeframe=args.timeframe, source=args.source_name)
+        print(f'Discovered symbols in {args.cache_dir} (timeframe={args.timeframe}, '
+              f'source={args.source_name}): {symbols}', file=sys.stderr)
+    else:
+        raise SystemExit('--symbols is required for csv/supabase sources')
+
+    if not symbols:
+        raise SystemExit(
+            f'no symbols to run for --source {args.source}. '
+            + ('Run fetch_supabase_csv.py first, or check --cache-dir/--timeframe/--source-name.'
+               if args.source == 'local' else 'Pass --symbols explicitly.')
+        )
+
+    all_records = []
+    for symbol in symbols:
+        all_records.extend(run_for_symbol(args, symbol))
+
+    if not all_records:
+        print('\nNo strategies cleared the minimum trade count on any slice.', file=sys.stderr)
+        sys.exit(1)
+
+    path = write_records(all_records, args.out_dir, run_name=args.source)
+    report_paths = write_reports(all_records, args.reports_dir, args.tracking_dir, run_name=args.source)
+
+    validated = [r for r in all_records if r['validated_out_of_sample']]
+    print(f'\nWrote {len(all_records)} strategies ({len(validated)} validated out-of-sample) -> {path}',
+          file=sys.stderr)
+    print(f'Wrote {len(report_paths)} report files -> {args.reports_dir}/ '
+          f'(index: {args.reports_dir}/summary_{args.source}.md)', file=sys.stderr)
+    print(f'Live-tracking ledgers seeded in {args.tracking_dir}/ -- log real trades with '
+          f'"python -m strategy.track_live --strategy-id <id> --r-multiple <R>"', file=sys.stderr)
+    print('\nTop validated strategies by out-of-sample edge:', file=sys.stderr)
+    for r in sorted(validated, key=lambda r: r['edge_score'], reverse=True)[:10]:
+        oos = r['performance']['out_of_sample']
+        print(f"  {r['universe_slice']['symbol']:22s} edge={r['edge_score']:+.3f} "
+              f"wr={oos['win_rate']:.0%} RR={oos['reward_risk']:.2f} n={oos['n_trades']:3d}  "
+              f"{r['entry_rule']['rule_text'][:70]}", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

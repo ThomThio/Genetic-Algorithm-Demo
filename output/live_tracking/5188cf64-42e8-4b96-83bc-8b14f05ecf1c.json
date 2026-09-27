@@ -1,0 +1,28 @@
+{
+  "strategy_id": "5188cf64-42e8-4b96-83bc-8b14f05ecf1c",
+  "symbol": "DEMO_MEAN_REVERT",
+  "rule_text": "stochastic oversold (period=14, threshold=17.7)",
+  "risk_model": {
+    "stop_atr_mult": 0.97,
+    "target_R": 3.69,
+    "max_hold_bars": 18,
+    "entry_fill": "next_bar_open"
+  },
+  "backtest_baseline": {
+    "n_trades": 24,
+    "win_rate": 0.375,
+    "win_rate_lb95": 0.2116,
+    "avg_win_R": 3.0426,
+    "avg_loss_R": 0.9351,
+    "reward_risk": 3.2538,
+    "profit_factor": 1.9523,
+    "expectancy_R": 0.5565,
+    "edge_score": -0.0934,
+    "net_profit_R": 13.3569,
+    "max_drawdown_R": 4.0,
+    "pnl_to_dd_ratio": 3.3392,
+    "sharpe_ratio": 1.1921,
+    "meets_min_trade_count": false
+  },
+  "live_trades": []
+}
