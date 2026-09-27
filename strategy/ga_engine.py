@@ -52,10 +52,11 @@ def _clip01(x: float) -> float:
     return min(0.999999, max(0.0, x))
 
 
-def evaluate_genome(g: List[float], df: pd.DataFrame, ind: pd.DataFrame) -> Evaluated:
+def evaluate_genome(g: List[float], df: pd.DataFrame, ind: pd.DataFrame, cost_bps: float = 0.0) -> Evaluated:
     spec = decode(g)
     signal, resolved = materialize_signal(spec, df, ind)
-    trades = run_backtest(df, ind['atr_14'], signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars)
+    trades = run_backtest(df, ind['atr_14'], signal, spec.stop_atr_mult, spec.target_R, spec.max_hold_bars,
+                           cost_bps=cost_bps)
     edge = compute_edge(trades)
     return Evaluated(genome=g, spec=spec, resolved_conditions=resolved, edge=edge, trades=trades)
 
@@ -93,10 +94,15 @@ def _mutate(g: List[float]) -> List[float]:
 
 def run_ga(df: pd.DataFrame, ind: pd.DataFrame, pop_size: int = POP_SIZE,
            generations: int = GENERATIONS, seed: Optional[int] = None,
-           progress_cb=None) -> List[Evaluated]:
+           progress_cb=None, cost_bps: float = 0.0) -> List[Evaluated]:
     """Runs the GA against one data slice. Returns the top distinct
     strategies (by decoded rule signature) found across all generations,
     ranked by edge_score, restricted to rules that cleared MIN_TRADES_FOR_SIGNAL.
+
+    cost_bps is applied inside the search itself (not just at reporting
+    time), so the GA is selecting for rules whose edge survives realistic
+    transaction cost rather than converging on ones that only look good
+    frictionless and happen to also clear cost later.
     """
     if seed is not None:
         random.seed(seed)
@@ -105,7 +111,7 @@ def run_ga(df: pd.DataFrame, ind: pd.DataFrame, pop_size: int = POP_SIZE,
     best_by_signature: Dict[str, Evaluated] = {}
 
     for gen in range(generations):
-        evaluated = [evaluate_genome(g, df, ind) for g in population_genomes]
+        evaluated = [evaluate_genome(g, df, ind, cost_bps=cost_bps) for g in population_genomes]
 
         for e in evaluated:
             sig = e.spec.signature()

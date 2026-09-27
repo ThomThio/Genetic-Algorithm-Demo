@@ -89,7 +89,8 @@ def run_for_symbol(args, symbol: str):
                   file=sys.stderr)
 
     qualified = run_ga(train_df, ind_train, pop_size=args.pop_size,
-                        generations=args.generations, seed=args.seed, progress_cb=progress)
+                        generations=args.generations, seed=args.seed, progress_cb=progress,
+                        cost_bps=args.cost_bps)
 
     if not qualified:
         print(f'  no rule cleared the {MIN_TRADES_FOR_SIGNAL}-trade minimum on train data', file=sys.stderr)
@@ -100,7 +101,7 @@ def run_for_symbol(args, symbol: str):
         oos_signal, oos_resolved = materialize_signal(evaluated.spec, test_df, ind_test)
         oos_trades = run_backtest(test_df, ind_test['atr_14'], oos_signal,
                                    evaluated.spec.stop_atr_mult, evaluated.spec.target_R,
-                                   evaluated.spec.max_hold_bars)
+                                   evaluated.spec.max_hold_bars, cost_bps=args.cost_bps)
         oos_edge = compute_edge(oos_trades)
 
         text = interpret(evaluated.resolved_conditions, evaluated.spec.stop_atr_mult,
@@ -118,7 +119,7 @@ def run_for_symbol(args, symbol: str):
             resolved_conditions=evaluated.resolved_conditions, interpretation=text,
             generation_found=evaluated.gen_found,
             ga_params={'pop_size': args.pop_size, 'generations': args.generations,
-                       'train_frac': args.train_frac},
+                       'train_frac': args.train_frac, 'cost_bps': args.cost_bps},
         )
         pairs.append((record, evaluated))
 
@@ -149,7 +150,8 @@ def run_for_symbol(args, symbol: str):
                   f"({args.n_random} random, {args.n_noise} noise, {args.n_shuffles} shuffle)...",
                   file=sys.stderr)
             robustness = run_robustness(df, evaluated.spec, n_random=args.n_random,
-                                         n_noise=args.n_noise, n_shuffles=args.n_shuffles, seed=args.seed)
+                                         n_noise=args.n_noise, n_shuffles=args.n_shuffles, seed=args.seed,
+                                         cost_bps=args.cost_bps)
             record['robustness'] = robustness
             vr = robustness.get('vs_random_distribution', {})
             nt = robustness.get('noise_test', {})
@@ -184,6 +186,11 @@ def main():
                          '(e.g. FTMO_MT4_demo). Leave unset only if there is just one per symbol+timeframe.')
     p.add_argument('--n-bars', type=int, default=1500, help='synthetic source only')
     p.add_argument('--train-frac', type=float, default=0.7)
+    p.add_argument('--cost-bps', type=float, default=2.0,
+                    help='round-trip transaction cost (spread + commission) in basis points of entry '
+                         'price, applied inside the GA search itself as well as IS/OOS reporting and '
+                         'robustness checks. 0 disables cost modeling entirely (frictionless -- not '
+                         'realistic, use only to compare against the cost-aware default).')
     p.add_argument('--pop-size', type=int, default=POP_SIZE)
     p.add_argument('--generations', type=int, default=GENERATIONS)
     p.add_argument('--seed', type=int, default=7)

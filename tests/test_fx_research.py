@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from fx_research import data
-from fx_research.backtest import FighterParams, evaluate, simulate_trade
+from fx_research.backtest import FighterParams, evaluate, flat_cost_fn, simulate_trade
 from fx_research.config import Settings
 from fx_research.features import RegimeThresholds, build_windows, classify, window_features
 from fx_research.optimizer import decode, encode, run_ga
@@ -96,21 +96,21 @@ def test_windows_are_n_trading_days_long():
 
 def arrays(df, a=0.001):
     return (df["Open"].to_numpy(), df["High"].to_numpy(), df["Low"].to_numpy(),
-            df["Close"].to_numpy(), np.full(len(df), a))
+            df["Close"].to_numpy(), np.full(len(df), a), df.index)
 
 
 def test_long_limit_fills_then_hits_target():
     # decision close 1.0000, ATR 0.001, limit at 0.9995, TP at +0.001
     df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0002, 0.9994, 0.9996), (0.9996, 1.0010, 0.9996, 1.0008)])
     p = FighterParams("long", k_atr=0.5, sl_atr=1.0, tp_atr=1.0, ttl_bars=5, reprice_every=0, max_hold_bars=10)
-    r = simulate_trade(*arrays(df), 0, len(df), 1, p, spread=0.0)
+    r = simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0))
     assert r == pytest.approx(1.0)
 
 
 def test_limit_never_touched_is_not_a_trade():
     df = bars_from([(1.0, 1.0, 1.0, 1.0)] + [(1.0, 1.001, 0.9999, 1.0)] * 5)
     p = FighterParams("long", k_atr=0.5, sl_atr=1.0, tp_atr=1.0, ttl_bars=3)
-    assert simulate_trade(*arrays(df), 0, len(df), 1, p, spread=0.0) is None
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0)) is None
 
 
 def test_fighter_reprice_chases_price_and_fills():
@@ -120,26 +120,26 @@ def test_fighter_reprice_chases_price_and_fills():
     df = bars_from(rows)
     static = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=10, reprice_every=0)
     chase = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=10, reprice_every=1)
-    assert simulate_trade(*arrays(df), 0, len(df), 1, static, 0.0) is None
-    assert simulate_trade(*arrays(df), 0, len(df), 1, chase, 0.0) == pytest.approx(1.0)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, static, flat_cost_fn(0.0)) is None
+    assert simulate_trade(*arrays(df), 0, len(df), 1, chase, flat_cost_fn(0.0)) == pytest.approx(1.0)
 
 
 def test_stop_wins_when_stop_and_target_share_a_bar():
     df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 0.9995, 0.9995), (0.9995, 1.01, 0.99, 1.0)])
     p = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=5)
-    assert simulate_trade(*arrays(df), 0, len(df), 1, p, 0.0) == pytest.approx(-1.0)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0)) == pytest.approx(-1.0)
 
 
 def test_short_side_mirrors_long():
     df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0006, 0.9998, 1.0004), (1.0004, 1.0004, 0.9990, 0.9992)])
     p = FighterParams("short", 0.5, 1.0, 1.0, ttl_bars=5)
-    assert simulate_trade(*arrays(df), 0, len(df), -1, p, 0.0) == pytest.approx(1.0)
+    assert simulate_trade(*arrays(df), 0, len(df), -1, p, flat_cost_fn(0.0)) == pytest.approx(1.0)
 
 
 def test_spread_reduces_r():
     df = bars_from([(1.0, 1.0, 1.0, 1.0), (1.0, 1.0002, 0.9994, 0.9996), (0.9996, 1.0010, 0.9996, 1.0008)])
     p = FighterParams("long", 0.5, 1.0, 1.0, ttl_bars=5)
-    assert simulate_trade(*arrays(df), 0, len(df), 1, p, spread=0.0001) == pytest.approx(0.9)
+    assert simulate_trade(*arrays(df), 0, len(df), 1, p, flat_cost_fn(0.0001)) == pytest.approx(0.9)
 
 
 # --- GA -------------------------------------------------------------------------

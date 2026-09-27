@@ -15,8 +15,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import functools
+
+from . import cost_model
 from . import data
-from .backtest import DIRECTION_MODES, MT4_DEFAULT, evaluate, fitness, spread_for, direction_for
+from .backtest import DIRECTION_MODES, MT4_DEFAULT, evaluate, fitness, direction_for
 from .config import REGIMES, Settings
 from .features import RegimeThresholds, atr, build_windows, classify, rank_analogs
 from .optimizer import run_ga
@@ -58,11 +61,16 @@ def _iso(ts):
     return pd.Timestamp(ts).isoformat()
 
 
-def analyse_instrument(instrument, bars, s, run_id, direction_modes=None, trace=None):
-    """Pure analysis step (no I/O). Returns (snapshot, analogs, strategy) records.
+def analyse_instrument(instrument, bars, s, run_id, direction_modes=None, trace=None, client=None):
+    """Pure analysis step (no I/O besides an optional read of logged spread samples via
+    `client`). Returns (snapshot, analogs, strategy) records.
 
     direction_modes restricts the GA to a subset of DIRECTION_MODES (e.g. ["short"]
-    for a shorts-only strategy); default (None) searches all of them."""
+    for a shorts-only strategy); default (None) searches all of them.
+
+    `client`, if given, lets the cost model prefer live-logged spread samples
+    (fx_research.spread_samples) over the static spread_for() table -- see cost_model.py.
+    """
     min_days = s.window_days * 3 + s.forward_days
     windows, days, first_pos, last_pos = build_windows(bars, s.window_days)
     if len(days) < min_days or len(windows) < 3:
@@ -74,7 +82,7 @@ def analyse_instrument(instrument, bars, s, run_id, direction_modes=None, trace=
         w.regime = classify(w.feats, th)
 
     arrays = (bars["Open"].to_numpy(), bars["High"].to_numpy(), bars["Low"].to_numpy(),
-              bars["Close"].to_numpy(), atr(bars).to_numpy())
+              bars["Close"].to_numpy(), atr(bars).to_numpy(), bars.index)
     close = arrays[3]
     atr_v = arrays[4]
 
@@ -114,20 +122,20 @@ def analyse_instrument(instrument, bars, s, run_id, direction_modes=None, trace=
     val_cases = [c for w in val for c in cases_for(w)]
     all_cases = train_cases + val_cases
 
-    spread = spread_for(instrument)
+    cost_fn = functools.partial(cost_model.cost_price_units, instrument, client=client, schema=s.results_schema)
     min_fills = max(3, len(train_cases) // 5)
-    ga = run_ga(lambda p: fitness(evaluate(arrays, train_cases, p, spread), min_fills),
+    ga = run_ga(lambda p: fitness(evaluate(arrays, train_cases, p, cost_fn), min_fills),
                 population_size=s.ga_population, generations=s.ga_generations,
                 seed=s.ga_seed, seed_params=[MT4_DEFAULT], direction_modes=direction_modes)
     best = ga.params
 
     def metrics(p, cases):
-        return evaluate(arrays, cases, p, spread).to_dict()
+        return evaluate(arrays, cases, p, cost_fn).to_dict()
 
     if trace is not None:   # per-trade (time, R) for each split, for run-level metrics (see runlog/metrics)
         for name, cs in (("train", train_cases), ("validate", val_cases), ("all", all_cases)):
             out = []
-            evaluate(arrays, cs, best, spread, trades_out=out)
+            evaluate(arrays, cs, best, cost_fn, trades_out=out)
             trace[name] = sorted((bars.index[st], r) for st, r in out)
     m_train, m_val, m_all = metrics(best, train_cases), metrics(best, val_cases), metrics(best, all_cases)
     base_all = metrics(MT4_DEFAULT, all_cases)
@@ -205,13 +213,14 @@ def run_scan(settings=None, store=None, loader=None, direction_modes=None):
                 bars = loader.load(ins)
                 trace = {}
                 snap, analogs, strat = analyse_instrument(ins, bars, s, run_id, direction_modes=direction_modes,
-                                                          trace=trace)
+                                                          trace=trace, client=client)
                 store.save_instrument(snap, analogs, strat)
                 if client is not None:   # every fit is also logged as a comparable run with the full metric set
                     from .walkforward import log_fit_run
+                    logged_spread = cost_model.spread_for_instrument(ins, client=client, schema=s.results_schema)
                     log_fit_run(client, s.results_schema, ins, snap, strat, trace,
                                 ",".join(direction_modes) if direction_modes else "any", "backtest",
-                                s.prices_source or None, s.window_days, spread_for(ins))
+                                s.prices_source or None, s.window_days, logged_spread)
                 results[ins] = strat
                 log.info("%s regime=%s params=%s train=%s", ins, snap["regime"], strat["params"],
                          strat["train_metrics"])

@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+from . import cost_model
 from . import data
 from .backfill import upsert_bars
-from .backtest import spread_for
 from .config import Settings
 from .decision import Decision, decide
 from .execute import (ACCOUNT_BALANCE, MAX_BAR_AGE_HOURS, RISK_PCT, FighterOrder, fighter_prices, get_symbol_info,
@@ -86,6 +86,10 @@ def plan_from_tick(direction, tick, params, sym, balance, risk):
             "rr": round(tp_dist / sl_dist, 2) if sl_dist else None, "warnings": warnings}
 
 
+SPREAD_SAMPLE_MIN_INTERVAL_S = 60   # throttle: one logged tick per instrument per minute is plenty for a
+                                     # trailing-quantile estimate, and keeps spread_samples from growing unbounded
+
+
 class Instrument:
     def __init__(self, name, direction):
         self.name, self.direction = name, direction.upper()
@@ -96,6 +100,22 @@ class Instrument:
         self.sym = None
         self.log = None
         self.analysis = None
+        self.last_spread_sample_at = 0.0
+
+
+def record_spread_sample(fx, instrument, now, tick):
+    """Logs one bid/ask spread sample to fx_research.spread_samples (see
+    sql/fx_research_spread_samples_schema.sql), the real data cost_model.estimate_spread_from_samples
+    reads back to replace backtest.spread_for()'s static guess. Best-effort: the table may not exist
+    yet on a fresh install (schema not applied), so a failure here never takes the runner down."""
+    try:
+        fx("spread_samples").insert({
+            "instrument": instrument, "ts": now.isoformat(),
+            "bid": tick["bid"], "ask": tick["ask"], "spread": tick["ask"] - tick["bid"],
+        }).execute()
+    except Exception as e:
+        print(f"{instrument}: could not log spread sample ({e!r}); has "
+              f"sql/fx_research_spread_samples_schema.sql been applied?")
 
 
 def main(argv=None):
@@ -197,6 +217,10 @@ def step_instrument(s, client, fx, loader, mt4, api, ins, args, mode, started):
     tick_raw = api.Get_last_tick_info(ins.name)
     tick = {"bid": tick_raw["bid"], "ask": tick_raw["ask"], "last": tick_raw.get("last deal price"), "ts": now.isoformat()}
 
+    if time.time() - ins.last_spread_sample_at >= SPREAD_SAMPLE_MIN_INTERVAL_S:
+        ins.last_spread_sample_at = time.time()
+        record_spread_sample(fx, ins.name, now, tick)
+
     # 1. new closed H1 bar -> refresh saved prices and re-run the analysis
     fresh = mt4.load(ins.name, "H1", 6)
     closed = fresh[fresh.index + pd.Timedelta(hours=1) <= pd.Timestamp(now)]
@@ -272,7 +296,7 @@ def analyse(s, client, fx, loader, api, ins, args, now):
                    "validate": strat["validate_metrics"], "params": strat["params"], "atr": hint["atr"],
                    "last_close": hint["last_close"]},
         "decision": {"action": d.action, "reason": d.reason, "gates": d.gates},
-        "spread": spread_for(ins.name),
+        "spread": cost_model.spread_for_instrument(ins.name, client=client, schema=s.results_schema),
     }
     print(f"{ins.name}: new bar {last} regime={snap['regime']} -> {d.action} ({d.reason})")
 

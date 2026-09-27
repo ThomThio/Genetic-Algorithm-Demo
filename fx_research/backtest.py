@@ -60,10 +60,13 @@ def direction_for(mode, drift):
     return sign if mode == "follow" else -sign
 
 
-def simulate_trade(o, h, l, c, atr_v, start, stop, direction, p, spread):
+def simulate_trade(o, h, l, c, atr_v, times, start, stop, direction, p, cost_fn):
     """One fighter entry decided at the close of bar `start`; bars up to `stop` (exclusive) usable.
 
-    Returns R multiple (after spread) or None if the order never filled.
+    `times` is the bars' DatetimeIndex (same length/positions as o/h/l/c/atr_v), needed so
+    `cost_fn(entry_time, exit_time) -> price units` can price in overnight swap alongside
+    spread (see cost_model.cost_price_units). Returns R multiple (after cost) or None if the
+    order never filled.
     """
     a = atr_v[start]
     if not np.isfinite(a) or a <= 0:
@@ -83,11 +86,13 @@ def simulate_trade(o, h, l, c, atr_v, start, stop, direction, p, spread):
             if hit:
                 # Gap through the limit fills at the open (a better price).
                 entry = min(o[i], limit) if direction == 1 else max(o[i], limit)
+                entry_time = times[i]
                 sl = entry - direction * p.sl_atr * a
                 tp = entry + direction * p.tp_atr * a
                 fill_bar = i
                 if (l[i] <= sl) if direction == 1 else (h[i] >= sl):
-                    return (sl - entry) * direction / (p.sl_atr * a) - spread / (p.sl_atr * a)
+                    cost = cost_fn(entry_time, times[i])
+                    return (sl - entry) * direction / (p.sl_atr * a) - cost / (p.sl_atr * a)
             elif p.reprice_every and (i - placed) % p.reprice_every == 0:
                 anchor, placed = c[i], i
             i += 1
@@ -96,15 +101,19 @@ def simulate_trade(o, h, l, c, atr_v, start, stop, direction, p, spread):
         tp_hit = (h[i] >= tp) if direction == 1 else (l[i] <= tp)
         risk = p.sl_atr * a
         if stop_hit:
-            return (sl - entry) * direction / risk - spread / risk
+            cost = cost_fn(entry_time, times[i])
+            return (sl - entry) * direction / risk - cost / risk
         if tp_hit:
-            return (tp - entry) * direction / risk - spread / risk
+            cost = cost_fn(entry_time, times[i])
+            return (tp - entry) * direction / risk - cost / risk
         if i - fill_bar >= p.max_hold_bars:
-            return (c[i] - entry) * direction / risk - spread / risk
+            cost = cost_fn(entry_time, times[i])
+            return (c[i] - entry) * direction / risk - cost / risk
         i += 1
     if entry is None:
         return None
-    return (c[stop - 1] - entry) * direction / (p.sl_atr * a) - spread / (p.sl_atr * a)
+    cost = cost_fn(entry_time, times[stop - 1])
+    return (c[stop - 1] - entry) * direction / (p.sl_atr * a) - cost / (p.sl_atr * a)
 
 
 @dataclass
@@ -127,16 +136,27 @@ class Metrics:
         return d
 
 
-def evaluate(arrays, cases, params, spread, trades_out=None):
+def flat_cost_fn(cost):
+    """A cost_fn that ignores timing and always returns the same flat price-units cost --
+    the pre-cost_model behaviour, kept for callers (e.g. an explicit --spread CLI override)
+    that want to bypass the live-sample/swap estimate entirely."""
+    return lambda entry_time, exit_time: cost
+
+
+def evaluate(arrays, cases, params, cost_fn, trades_out=None):
     """Run the strategy over every decision point.
 
     `cases` is a list of (start_bar, stop_bar, drift) tuples, one per decision.
+    `arrays` is (open, high, low, close, atr, times) -- times is the bars'
+    DatetimeIndex, needed by cost_fn for overnight-swap counting.
+    `cost_fn(entry_time, exit_time) -> price units` -- see cost_model.cost_price_units,
+    or flat_cost_fn(x) for a fixed value regardless of timing.
     """
-    o, h, l, c, atr_v = arrays
+    o, h, l, c, atr_v, times = arrays
     rs = []
     for start, stop, drift in cases:
         d = direction_for(params.direction_mode, drift)
-        r = simulate_trade(o, h, l, c, atr_v, start, stop, d, params, spread)
+        r = simulate_trade(o, h, l, c, atr_v, times, start, stop, d, params, cost_fn)
         if r is not None:
             rs.append(r)
             if trades_out is not None:

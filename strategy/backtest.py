@@ -7,6 +7,16 @@ the close of the last allowed bar. If a single bar's range contains both
 the stop and the target, the stop is assumed to have been hit first (the
 conservative assumption). Trades do not overlap: after an exit, scanning
 resumes at the following bar.
+
+`cost_bps` is a round-trip transaction cost (spread + commission), in basis
+points of the entry price, subtracted from every trade. This backtest is
+asset-agnostic (FX pairs, equities, whatever a data source provides), so
+unlike fx_research's pip/swap-based cost model, cost here is a simple
+percentage-of-price -- the caller is responsible for passing a realistic
+number for the instrument being tested. Defaulting this to 0.0 keeps the
+function itself a frictionless baseline for testing; run_discovery.py's
+CLI defaults --cost-bps to a non-zero value so a *real* run of this backtest
+is never silently frictionless.
 """
 from dataclasses import dataclass, asdict
 from typing import List
@@ -30,7 +40,8 @@ class Trade:
 
 
 def run_backtest(df: pd.DataFrame, atr_series: pd.Series, signal: pd.Series,
-                  stop_atr_mult: float, target_R: float, max_hold_bars: int) -> List[Trade]:
+                  stop_atr_mult: float, target_R: float, max_hold_bars: int,
+                  cost_bps: float = 0.0) -> List[Trade]:
     n = len(df)
     opens = df['open'].to_numpy()
     highs = df['high'].to_numpy()
@@ -70,7 +81,8 @@ def run_backtest(df: pd.DataFrame, atr_series: pd.Series, signal: pd.Series,
                 exit_price = closes[last_bar]
                 exit_reason = 'time'
 
-            r_multiple = (exit_price - entry_price) / risk if risk > 0 else 0.0
+            cost = entry_price * (cost_bps / 10000.0)
+            r_multiple = ((exit_price - entry_price) - cost) / risk if risk > 0 else 0.0
             trades.append(Trade(
                 entry_time=str(idx[entry_idx]),
                 exit_time=str(idx[exit_idx]),

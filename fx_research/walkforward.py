@@ -9,13 +9,15 @@ the live executor uses.
     python -m fx_research.walkforward --instrument USDSGD --direction short --mode backtest
 """
 import argparse
+import functools
 import sys
 
 import numpy as np
 import pandas as pd
 
+from . import cost_model
 from . import data
-from .backtest import FighterParams, direction_for, simulate_trade, spread_for
+from .backtest import FighterParams, direction_for, flat_cost_fn, simulate_trade
 from .config import Settings
 from .decision import decide
 from .features import atr
@@ -45,16 +47,19 @@ def summarize_r(rs, balance0, balance):
             "return_pct": (balance / balance0 - 1) * 100}
 
 
-def run_walkforward(log, ins, bars, s, direction, spread, balance0=BALANCE, risk=RISK, step=1, fixed=None):
+def run_walkforward(log, ins, bars, s, direction, cost_fn, balance0=BALANCE, risk=RISK, step=1, fixed=None,
+                     client=None):
     o, h, l, c = (bars[k].to_numpy() for k in ("Open", "High", "Low", "Close"))
     atr_v = atr(bars).to_numpy()
+    bar_times = bars.index
     days = day_close_positions(bars)
-    balance, rs, times, exposure_until, n = balance0, [], [], -1, len(bars)
+    balance, rs, trade_times, exposure_until, n = balance0, [], [], -1, len(bars)
     counts = {"decisions": 0, "entries": 0, "fills": 0}
     for day, p in days[MIN_WARMUP_DAYS::step]:
         as_of = bars.index[p]
         try:
-            snap, _, strat = analyse_instrument(ins, bars.iloc[:p + 1], s, log.run_id, direction_modes=[direction])
+            snap, _, strat = analyse_instrument(ins, bars.iloc[:p + 1], s, log.run_id, direction_modes=[direction],
+                                                 client=client)
         except ValueError:
             continue
         counts["decisions"] += 1
@@ -71,7 +76,7 @@ def run_walkforward(log, ins, bars, s, direction, spread, balance0=BALANCE, risk
         if d.action == "ENTER":
             counts["entries"] += 1
             stop = min(p + 2 + params.ttl_bars + params.max_hold_bars, n)
-            r = simulate_trade(o, h, l, c, atr_v, p, stop, sign, params, spread) if stop - p > 2 else None
+            r = simulate_trade(o, h, l, c, atr_v, bar_times, p, stop, sign, params, cost_fn) if stop - p > 2 else None
             exposure_until = stop - 1
             if r is None:
                 log.trade(decision_id=did, instrument=ins, direction=order["direction"], simulated=True,
@@ -82,10 +87,11 @@ def run_walkforward(log, ins, bars, s, direction, spread, balance0=BALANCE, risk
                 pnl = r * balance * risk
                 balance += pnl
                 rs.append(r)
-                times.append(as_of)
+                trade_times.append(as_of)
+                spread_cost = cost_fn(as_of, as_of)   # spread component only, for logging (swap needs the real exit)
                 log.trade(decision_id=did, instrument=ins, direction=order["direction"], simulated=True,
                           status="closed", placed_at=str(as_of), limit_price=limit, sl=sl, tp=tp,
-                          risk_usd=order["risk_usd"], spread_cost=spread, r_multiple=r, pnl_usd=pnl)
+                          risk_usd=order["risk_usd"], spread_cost=spread_cost, r_multiple=r, pnl_usd=pnl)
         m = summarize_r(rs, balance0, balance)
         log.metrics(as_of, decisions=counts["decisions"], entries=counts["entries"], fills=counts["fills"],
                     closed=m["closed"], mean_r=m["mean_r"], total_r=m["total_r"], win_rate=m["win_rate"],
@@ -114,11 +120,14 @@ def log_fit_run(client, schema, ins, snap, strat, trace, direction, mode="backte
     return log
 
 
-def run_backtest(client, s, ins, bars, direction, spread, data_source):
+def run_backtest(client, s, ins, bars, direction, data_source, logged_spread=None):
+    """The backtest mode only fits+logs (analyse_instrument's own internal cost_fn, built
+    from `client`, is what the GA search inside it actually uses); the walkforward mode below
+    is what calls simulate_trade directly and needs a real cost_fn."""
     trace = {}
-    snap, _, strat = analyse_instrument(ins, bars, s, "bt", direction_modes=[direction], trace=trace)
+    snap, _, strat = analyse_instrument(ins, bars, s, "bt", direction_modes=[direction], trace=trace, client=client)
     log = log_fit_run(client, s.results_schema, ins, snap, strat, trace, direction, "backtest", data_source,
-                      s.window_days, spread)
+                      s.window_days, logged_spread)
     return log, {"recommended": strat["recommended"], "train": strat["train_metrics"],
                  "validate": strat["validate_metrics"]}
 
@@ -146,19 +155,25 @@ def main(argv=None):
     client = make_supabase_client(s)
     ins = args.instrument
     bars = BarLoader(s, client).load(ins)
-    spread = args.spread if args.spread is not None else spread_for(ins)
+    if args.spread is not None:
+        # explicit override: a flat cost, exactly like before this fix, bypassing live samples/swap
+        cost_fn, logged_spread = flat_cost_fn(args.spread), args.spread
+    else:
+        cost_fn = functools.partial(cost_model.cost_price_units, ins, client=client, schema=s.results_schema)
+        logged_spread = cost_model.spread_for_instrument(ins, client=client, schema=s.results_schema)
     if args.mode == "backtest":
-        log, summary = run_backtest(client, s, ins, bars, args.direction, spread, args.data_source)
+        log, summary = run_backtest(client, s, ins, bars, args.direction, args.data_source, logged_spread)
         print(f"run {log.run_id} (backtest)")
         return 0
     log = RunLogger(client, s.results_schema, args.mode, ins,
                     params={"ga_population": s.ga_population, "ga_generations": s.ga_generations, "seed": s.ga_seed,
-                            "spread": spread, "balance": BALANCE, "risk_pct": RISK, "step": args.step,
+                            "spread": logged_spread, "balance": BALANCE, "risk_pct": RISK, "step": args.step,
                             "fixed": fixed.to_dict() if fixed else None},
                     direction=args.direction, data_source=args.data_source, window_days=s.window_days,
                     train_start=str(bars.index[0]), test_start=str(bars.index[0]), test_end=str(bars.index[-1]))
     try:
-        summary = run_walkforward(log, ins, bars, s, args.direction, spread, step=args.step, fixed=fixed)
+        summary = run_walkforward(log, ins, bars, s, args.direction, cost_fn, step=args.step, fixed=fixed,
+                                   client=client)
         summary["edge"] = log.finish(summary)
     except Exception as e:
         log.finish({"error": repr(e)}, status="failed")
