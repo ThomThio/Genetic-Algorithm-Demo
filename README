@@ -11,3 +11,22 @@ The problem we solve is:
     **Important: In Fup's code, the evaluation of the expressions generated was simple, left to right
     evaluation. I have used normal arithmetic precedence based evaluation(see `expr.py')
 
+Data ingestion
+--------------
+`data_sources/` and `ingest.py` pull historical OHLCV bars into one canonical
+schema (UTC-indexed timestamp + open/high/low/close/volume) so the same
+instrument can be compared across providers. The first source is
+`histdata.com`'s free ASCII bar data (`data_sources/histdata.py`).
+
+    pip install -r requirements.txt
+    python3 ingest.py --instrument EURUSD --timeframe H1 --start 2023-01-01 --end 2023-12-31
+
+This writes a CSV to `data/raw/histdata/EURUSD/H1.csv`. Note that
+histdata.com's download flow isn't a plain link - the download page embeds a
+one-time form token that must be POSTed to get.php to receive the ZIP; see
+`data_sources/histdata.py` for that flow. Run `python3 -m pytest tests/` to
+exercise the token/CSV parsing against fixtures without hitting the network.
+
+To add another source for comparison, implement `DataSource.fetch()`
+(`data_sources/base.py`) and register it in `data_sources.SOURCES`.
+
