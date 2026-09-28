@@ -5,8 +5,15 @@ Instead of listing weekday hours by hand, it fires every hour (FXR_CRON_HOUR /
 FXR_CRON_MINUTE) and skips runs while the FX market is closed
 (Friday 17:00 to Sunday 17:00 New York time).
 
-    python -m fx_research.scheduler            # run forever
-    python -m fx_research.scheduler --once     # one scan now, then exit
+Also runs a second job every 15 minutes that scans USDSGD specifically for a
+fighter-entry signal (see entry_watch.py) -- paper (analyse/decide/notify
+only) unless started with --allow-live, in which case a signal only turns
+into a real order when fx_research.trading_control is additionally armed
+for USDSGD (same switch live_runner.py's web UI uses).
+
+    python -m fx_research.scheduler                 # run forever, paper only
+    python -m fx_research.scheduler --once           # one hourly scan now, then exit
+    python -m fx_research.scheduler --allow-live     # run forever; USDSGD entry watch can place real orders when armed
 """
 import argparse
 import json
@@ -62,17 +69,37 @@ def scan_job(settings=None, force=False):
     notify(msg)
 
 
-def build_scheduler(settings):
+def entry_watch_job(settings, allow_live, instrument="USDSGD", force=False):
+    # Imported lazily: entry_watch imports notify from this module, so a
+    # module-level import here would be circular.
+    from .entry_watch import entry_watch
+
+    if not force and not market_open():
+        log.info("market closed, skipping %s entry watch", instrument)
+        return
+    try:
+        entry_watch(instrument=instrument, settings=settings, allow_live=allow_live)
+    except Exception as e:
+        log.error("%s entry watch crashed: %s", instrument, e)
+        notify(f"{instrument} entry watch crashed: {e}")
+
+
+def build_scheduler(settings, allow_live=False):
     scheduler = BlockingScheduler(job_defaults={"misfire_grace_time": 15 * 60, "coalesce": True,
                                                 "max_instances": 1})
     trigger = CronTrigger(hour=settings.cron_hour, minute=settings.cron_minute, timezone=settings.timezone)
     scheduler.add_job(scan_job, trigger, args=[settings], id="fx_research_scan")
 
+    entry_trigger = CronTrigger(minute="*/15", timezone=settings.timezone)
+    scheduler.add_job(entry_watch_job, entry_trigger, args=[settings, allow_live],
+                      id="usdsgd_entry_watch_15min")
+
     def listener(event):
         if event.exception:
-            log.error("scan job crashed: %s", event.exception)
-            notify(f"FX research scan crashed: {event.exception}")
-        else:
+            log.error("job %s crashed: %s", event.job_id, event.exception)
+            if event.job_id == "fx_research_scan":
+                notify(f"FX research scan crashed: {event.exception}")
+        elif event.job_id == "fx_research_scan":
             job = scheduler.get_job("fx_research_scan")
             if job and job.next_run_time:
                 log.info("next scan at %s", job.next_run_time)
@@ -83,16 +110,19 @@ def build_scheduler(settings):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--once", action="store_true", help="run one scan now (even if the market is closed)")
+    ap.add_argument("--once", action="store_true", help="run one hourly scan now (even if the market is closed)")
+    ap.add_argument("--allow-live", action="store_true",
+                     help="let the USDSGD entry watch place real orders when fx_research.trading_control "
+                          "is armed for it (default: paper -- analyse, decide, and notify, never order)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings()
     if args.once:
         scan_job(settings, force=True)
         return
-    scheduler = build_scheduler(settings)
-    log.info("scheduler started (%s, hour=%s minute=%s)", settings.timezone, settings.cron_hour,
-             settings.cron_minute)
+    scheduler = build_scheduler(settings, allow_live=args.allow_live)
+    log.info("scheduler started (%s, hourly scan hour=%s minute=%s; USDSGD entry watch every 15min, "
+             "allow_live=%s)", settings.timezone, settings.cron_hour, settings.cron_minute, args.allow_live)
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

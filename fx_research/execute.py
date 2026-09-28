@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 
 import pandas as pd
@@ -26,6 +27,7 @@ from .scan import BarLoader, analyse_instrument
 from .store import make_supabase_client
 
 BAR_SECONDS = 3600
+STEP_POLL_SECONDS = 30  # how often run_fighter checks order state; tests shrink this to poll instantly
 ACCOUNT_BALANCE = float(os.environ.get("FXR_ACCOUNT_BALANCE", "100000"))
 RISK_PCT = float(os.environ.get("FXR_RISK_PCT", "0.03"))
 MAX_BAR_AGE_HOURS = float(os.environ.get("FXR_MAX_BAR_AGE_HOURS", "3"))
@@ -165,16 +167,133 @@ class FighterOrder:
 
 
 def run_fighter(api, symbol, direction, params, sym, balance, risk_pct):
-    """Blocking version for the one-shot CLI: place, then step every 30s until the order is done."""
+    """Blocking: place, then step every 30s until the order is done.
+
+    Returns (ticket, final_state): final_state is 'filled', 'cancelled', or
+    'gone'; both are None if the order was never placed (rejected, or the
+    risk budget was below the broker's minimum lot).
+    """
     order = FighterOrder(api, symbol, direction, params, sym, balance, risk_pct)
     if order.place() is None:
-        return None
+        return None, None
     while True:
-        time.sleep(30)
+        time.sleep(STEP_POLL_SECONDS)
         state = order.step()
         if state != "pending":
             print(f"Order #{order.ticket} is {state}.")
-            return order.ticket
+            return order.ticket, state
+
+
+def scan_and_execute(mt4, symbol, s, balance=ACCOUNT_BALANCE, risk_pct=RISK_PCT,
+                      direction_modes=None, live=False, notify=None, run_label="exec"):
+    """One full pass over `symbol`: load bars, analyse, decide, and if ENTER,
+    place a fighter entry -- the same flow main() runs as a one-shot CLI,
+    factored out so a periodic caller (e.g. a scheduler job) can reuse it.
+
+    `direction_modes=None` (the default here) lets the GA pick whichever
+    direction the current regime favors, using `strat["live_hint"]
+    ["direction"]`; pass e.g. ["short"] to restrict it, matching the CLI's
+    `--direction` behavior.
+
+    If `live` and an order is placed, it's handed to a background thread
+    that calls `run_fighter()` to manage it (re-price/TTL-cancel) to
+    resolution -- this function returns immediately rather than blocking
+    for up to `ttl_bars` hours, so a periodic caller isn't stalled waiting
+    on one order. The caller's process must stay alive for that thread to
+    finish; `decide()`'s existing `no_open_exposure` gate already prevents
+    a later call from placing a second order while one is still pending.
+
+    `notify(text)`, if given, is called once when a signal is found, and
+    again when the order resolves (filled/expired/rejected) or would have
+    been placed but wasn't (dry run). No call is made on SKIP.
+
+    Returns a dict describing what happened, for logging/testing.
+    """
+    api = mt4.api
+    s.bar_source = "mt4"  # `mt4` was already opened for us; make sure BarLoader actually uses it
+    loader = BarLoader(s, make_supabase_client(s) if s.has_supabase else None)
+    loader.mt4 = mt4
+    bars = loader.load(symbol)
+    age_h = (pd.Timestamp.now(tz="UTC") - bars.index[-1]).total_seconds() / 3600
+    snap, _, strat = analyse_instrument(symbol, bars, s, run_label, direction_modes=direction_modes)
+    p, hint = strat["params"], strat["live_hint"]
+    summary = (f"{symbol} regime={snap['regime']} recommended={strat['recommended']} "
+               f"train={strat['train_metrics']['mean_r']:+.2f}R val={strat['validate_metrics']['mean_r']:+.2f}R "
+               f"last bar {age_h:.1f}h old")
+    print(summary)
+
+    d = decide(strat, bar_age_hours=age_h, max_bar_age_hours=MAX_BAR_AGE_HOURS,
+               has_exposure=has_our_exposure(api, symbol))
+    result = {"action": d.action, "reason": d.reason, "summary": summary}
+
+    log = None
+    if s.has_supabase:
+        log = RunLogger(make_supabase_client(s), s.results_schema, "live" if live else "paper", symbol,
+                        params={**p, "balance": balance, "risk_pct": risk_pct},
+                        direction=hint["direction"], data_source=s.prices_source or None,
+                        window_days=s.window_days)
+
+    inputs = {"features": snap["features"], "atr": hint["atr"], "bar_age_h": age_h}
+    if d.action != "ENTER":
+        print(f"{d.action}: {d.reason}. No order.")
+        if log:
+            log.decision(bars.index[-1], symbol, d, snap["regime"], inputs)
+            log.finish({"decision": d.action, "reason": d.reason})
+        return result
+
+    if notify:
+        notify(f"\U0001F514 {symbol} entry signal found -- {hint['direction']}, "
+               f"train={strat['train_metrics']['mean_r']:+.2f}R val={strat['validate_metrics']['mean_r']:+.2f}R, "
+               f"{d.reason}")
+
+    sym = get_symbol_info(api, symbol)
+    params = {**p, "atr": hint["atr"]}
+    tick = api.Get_last_tick_info(symbol)
+    direction = hint["direction"]
+    anchor = tick["bid"] if direction == "SHORT" else tick["ask"]
+    limit, sl, tp = fighter_prices(direction, anchor, hint["atr"], tick["ask"], sym, params)
+    lots = size_lots(balance, risk_pct, limit, sl, sym, tick["ask"] - tick["bid"])
+    risk_usd = balance * risk_pct
+    setup_msg = (f"Setup: {direction} limit {limit}  SL {sl}  TP {tp}  lots {lots}  "
+                 f"(risking ${risk_usd:,.0f} = {risk_pct:.0%} of ${balance:,.0f}; "
+                 f"ttl {p['ttl_bars']} bar(s), re-price every {p['reprice_every']})")
+    print(setup_msg)
+    result.update({"direction": direction, "limit": limit, "sl": sl, "tp": tp, "lots": lots, "risk_usd": risk_usd})
+    order = {"direction": direction, "limit": limit, "sl": sl, "tp": tp, "lots": lots,
+             "risk_usd": risk_usd, "balance_used": balance}
+    did = log.decision(bars.index[-1], symbol, d, snap["regime"], inputs, order) if log else None
+
+    if not live:
+        print("DRY RUN: nothing sent. Re-run with live=True (--live on the CLI) to place it.")
+        if log:
+            log.finish({"decision": "ENTER", "dry_run": True})
+        if notify:
+            notify(f"\U0001F515 {symbol} signal found but not armed -- dry-run, no order placed. {setup_msg}")
+        result["dry_run"] = True
+        return result
+
+    def _manage_and_notify():
+        ticket, final_state = run_fighter(api, symbol, direction, params, sym, balance, risk_pct)
+        if log:
+            log.trade(decision_id=did, instrument=symbol, direction=direction, simulated=False, ticket=ticket,
+                      status=final_state or "cancelled", placed_at=pd.Timestamp.now(tz="UTC").isoformat(),
+                      limit_price=limit, sl=sl, tp=tp, lots=lots, risk_usd=risk_usd)
+            log.finish({"decision": "ENTER", "ticket": ticket, "final_state": final_state})
+        if not notify:
+            return
+        if ticket and final_state == "filled":
+            notify(f"✅ {symbol} fighter entry FILLED -- ticket={ticket}, limit={limit} "
+                   f"SL={sl} TP={tp} lots={lots}")
+        elif ticket:
+            notify(f"⌛ {symbol} fighter entry #{ticket} resolved as {final_state} (unfilled)")
+        else:
+            notify(f"\U0001F6AB {symbol} fighter entry not placed (rejected, or below minimum lot).")
+
+    result["placing"] = True
+    thread = threading.Thread(target=_manage_and_notify, daemon=True, name=f"fighter-{symbol}")
+    thread.start()
+    result["thread"] = thread  # exposed for tests to join(); callers don't need to wait on it
+    return result
 
 
 def main(argv=None):
@@ -192,58 +311,11 @@ def main(argv=None):
     s.ga_seed = args.seed
     mt4 = data.MT4Bars(s)
     try:
-        api, symbol = mt4.api, args.instrument
-        loader = BarLoader(s, make_supabase_client(s) if s.has_supabase else None)
-        loader.mt4 = mt4
-        bars = loader.load(symbol)
-        age_h = (pd.Timestamp.now(tz="UTC") - bars.index[-1]).total_seconds() / 3600
-        snap, _, strat = analyse_instrument(symbol, bars, s, "exec", direction_modes=[args.direction])
-        p, hint = strat["params"], strat["live_hint"]
-        print(f"{symbol} regime={snap['regime']} recommended={strat['recommended']} "
-              f"train={strat['train_metrics']['mean_r']:+.2f}R val={strat['validate_metrics']['mean_r']:+.2f}R "
-              f"last bar {age_h:.1f}h old")
-        d = decide(strat, bar_age_hours=age_h, max_bar_age_hours=MAX_BAR_AGE_HOURS,
-                   has_exposure=has_our_exposure(api, symbol))
-        log = None
-        if s.has_supabase:
-            log = RunLogger(make_supabase_client(s), s.results_schema, "live" if args.live else "paper", symbol,
-                            params={**p, "balance": args.balance, "risk_pct": args.risk},
-                            direction=args.direction, data_source=s.prices_source or None,
-                            window_days=s.window_days)
-        inputs = {"features": snap["features"], "atr": hint["atr"], "bar_age_h": age_h}
-        if d.action != "ENTER":
-            print(f"{d.action}: {d.reason}. No order.")
-            if log:
-                log.decision(bars.index[-1], symbol, d, snap["regime"], inputs)
-                log.finish({"decision": d.action, "reason": d.reason})
-            return 0
-
-        sym = get_symbol_info(api, symbol)
-        params = {**p, "atr": hint["atr"]}
-        tick = api.Get_last_tick_info(symbol)
-        direction = args.direction.upper()
-        anchor = tick["bid"] if direction == "SHORT" else tick["ask"]
-        limit, sl, tp = fighter_prices(direction, anchor, hint["atr"], tick["ask"], sym, params)
-        lots = size_lots(args.balance, args.risk, limit, sl, sym, tick["ask"] - tick["bid"])
-        risk_usd = args.balance * args.risk
-        print(f"Setup: {direction} limit {limit}  SL {sl}  TP {tp}  lots {lots}  "
-              f"(risking ${risk_usd:,.0f} = {args.risk:.0%} of ${args.balance:,.0f}; "
-              f"ttl {p['ttl_bars']} bar(s), re-price every {p['reprice_every']})")
-        order = {"direction": direction, "limit": limit, "sl": sl, "tp": tp, "lots": lots,
-                 "risk_usd": risk_usd, "balance_used": args.balance}
-        did = log.decision(bars.index[-1], symbol, d, snap["regime"], inputs, order) if log else None
-        if not args.live:
-            print("DRY RUN: nothing sent. Re-run with --live to place it.")
-            if log:
-                log.finish({"decision": "ENTER", "dry_run": True})
-            return 0
-        ticket = run_fighter(api, symbol, direction, params, sym, args.balance, args.risk)
-        if log:
-            log.trade(decision_id=did, instrument=symbol, direction=direction, simulated=False, ticket=ticket,
-                      status="pending" if ticket else "cancelled", placed_at=pd.Timestamp.now(tz="UTC").isoformat(),
-                      limit_price=limit, sl=sl, tp=tp, lots=lots,
-                      risk_usd=risk_usd)
-            log.finish({"decision": "ENTER", "ticket": ticket})
+        result = scan_and_execute(mt4, args.instrument, s, balance=args.balance, risk_pct=args.risk,
+                                  direction_modes=[args.direction], live=args.live, run_label="exec")
+        thread = result.get("thread")
+        if thread is not None:
+            thread.join()  # block until the fighter entry resolves -- matches the original CLI's behavior
     finally:
         mt4.close()
     return 0

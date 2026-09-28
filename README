@@ -23,6 +23,47 @@ See docs/FX_MT4_PLAN.md for how it ties into MT4-TradeSignals and TradeCoreV2.
     python -m fx_research.scan --dry-run
     python -m fx_research.scheduler
 
+Live execution: USDSGD 15-minute entry watch
+---------------------------------------------
+`fx_research.scheduler` also runs a second job every 15 minutes
+(`fx_research/entry_watch.py`, on top of `fx_research/execute.py`'s
+scan -> decide -> fighter-entry flow) that checks USDSGD specifically for a
+fighter-entry signal and, if armed, places and manages it until it fills or
+times out. A one-off pass (no scheduler) looks like:
+
+    python -m fx_research.entry_watch                  # paper: analyse, decide, notify -- never orders
+    python -m fx_research.entry_watch --allow-live      # can place a real order, only if armed (see below)
+    python -m fx_research.scheduler --allow-live        # hourly scan + 15-min USDSGD watch, forever
+
+Two safety gates both have to be open before a real order is placed, same
+as `fx_research/live_runner.py`'s already-established pattern -- there is
+one remote kill switch across both live-trading entry points in this repo:
+
+1. The process itself was started with `--allow-live`.
+2. `fx_research.trading_control`'s row for `USDSGD` has `enabled = true`
+   and `armed_until` in the future (`sql/fx_live_schema.sql`) -- flip this
+   from anywhere (the web UI, a Supabase SQL editor, curl) without
+   restarting the scheduler process.
+
+Without both, every 15-minute pass still runs the full analysis and decision
+and sends the same Telegram notifications (`TELEGRAM_BOT_TOKEN`/
+`TELEGRAM_CHAT_ID` env vars, see `fx_research/scheduler.py::notify`) -- it
+just never calls MT4's order-placement API. No message is sent when there's
+no signal (SKIP), only when one is found and again once it resolves
+(filled / expired / rejected / dry-run).
+
+**Prerequisite**: `fx_research` reads price bars from `public.fx_prices`
+(`FXR_PRICES_TABLE`), a *different* table from `public.prices` used
+elsewhere in this repo -- confirm USDSGD/H1 rows tagged with your
+`FXR_PRICES_SOURCE` actually exist there before expecting a live signal;
+`analyse_instrument` raises a clear "not enough trading days of data" error
+otherwise, it won't fail silently.
+
+**This must run on the Windows box next to the actual MT4 terminal**
+(`deploy/windows_setup.ps1`), not in a Linux sandbox: MT4 connectivity is a
+ZeroMQ bridge (`EACommunicator_API`, `MT4_TRADESIGNALS_PATH`) to a running
+MT4 terminal with DLL imports enabled, same-machine/same-LAN only.
+
 ===============================================================================
 strategy/ -- GA-evolved long-only trading entry signals
 ===============================================================================
